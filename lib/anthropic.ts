@@ -1,5 +1,16 @@
 import type { AnswerRecord, Lesson, Response, Verdict } from "./types";
-import { technicalityPrompt } from "./constants";
+import {
+  scopePrompt,
+  sizeMaxTokens,
+  sizePrompt,
+  technicalityPrompt,
+} from "./constants";
+
+export interface GenOptions {
+  tech: number;
+  scope: number;
+  size: number;
+}
 
 /*
  * BYOK Anthropic client.
@@ -49,7 +60,11 @@ interface MessagesResponse {
 }
 
 /** Single round-trip to the Messages API; returns the concatenated text. */
-async function callClaude(apiKey: string, prompt: string): Promise<string> {
+async function callClaude(
+  apiKey: string,
+  prompt: string,
+  maxTokens: number = MAX_TOKENS
+): Promise<string> {
   let res: globalThis.Response;
   try {
     res = await fetch(API_URL, {
@@ -62,7 +77,7 @@ async function callClaude(apiKey: string, prompt: string): Promise<string> {
       },
       body: JSON.stringify({
         model: MODEL,
-        max_tokens: MAX_TOKENS,
+        max_tokens: maxTokens,
         messages: [{ role: "user", content: prompt }],
       }),
     });
@@ -125,7 +140,7 @@ function parseJson<T>(raw: string): T {
 
 function buildExplainPrompt(
   topic: string,
-  tech: number,
+  opts: GenOptions,
   fromTopic: string | null
 ): string {
   return `You are the engine of a study loop: the learner picks a topic, you explain it, then you pose one question that tests whether they grasped the core idea.
@@ -136,9 +151,12 @@ ${
     ? `This is a branch that follows on from "${fromTopic}" — connect to it in a sentence, but make the explanation stand on its own.`
     : ""
 }
-Write at technicality level ${tech} out of 10. ${technicalityPrompt(tech)}
+Follow all three of these dials:
+- Technicality (${opts.tech}/10): ${technicalityPrompt(opts.tech)}
+- Scope (${opts.scope}/10): ${scopePrompt(opts.scope)}
+- Length (${opts.size}/10): ${sizePrompt(opts.size)}
 
-1. Explain the topic in 4-6 clear sentences at that level. The explanation must stand alone and build logically.
+1. Explain the topic, obeying the technicality, scope, and length dials above. The explanation must stand alone and build logically.
 2. Pose ONE open-ended question testing whether the reader grasped the CENTRAL idea — a "why", "explain", or "what would happen if" question, never a lookup of an exact figure or name.
 3. List 1-3 short key points a correct answer must convey.
 
@@ -216,10 +234,14 @@ If the session is too thin to suggest anything useful, return {"topics":[]}.`;
 export async function generateExplanation(
   apiKey: string,
   topic: string,
-  tech: number,
+  opts: GenOptions,
   fromTopic: string | null = null
 ): Promise<Lesson> {
-  const raw = await callClaude(apiKey, buildExplainPrompt(topic, tech, fromTopic));
+  const raw = await callClaude(
+    apiKey,
+    buildExplainPrompt(topic, opts, fromTopic),
+    sizeMaxTokens(opts.size)
+  );
   const parsed = parseJson<Partial<Lesson>>(raw);
   if (!parsed.explanation || typeof parsed.explanation !== "string") {
     throw new AnthropicError(

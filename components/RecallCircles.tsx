@@ -5,9 +5,13 @@ import {
   ANSWER_SECONDS,
   COLORS,
   READ_SECONDS,
+  SCOPE_DEFAULT,
+  SIZE_DEFAULT,
+  SLIDER_MAX,
+  SLIDER_MIN,
   TECH_DEFAULT,
-  TECH_MAX,
-  TECH_MIN,
+  scopeLabel,
+  sizeLabel,
   technicalityLabel,
 } from "@/lib/constants";
 import { fmt } from "@/lib/utils";
@@ -40,6 +44,8 @@ export default function RecallCircles() {
   const [phase, setPhase] = useState<Phase>("input");
   const [topic, setTopic] = useState("");
   const [tech, setTech] = useState(TECH_DEFAULT);
+  const [scope, setScope] = useState(SCOPE_DEFAULT);
+  const [size, setSize] = useState(SIZE_DEFAULT);
 
   const [title, setTitle] = useState("");
   const [explanation, setExplanation] = useState("");
@@ -152,7 +158,12 @@ export default function RecallCircles() {
     setPhase("loading");
     setError("");
     try {
-      const lesson = await generateExplanation(apiKey, t, tech, fromTopic);
+      const lesson = await generateExplanation(
+        apiKey,
+        t,
+        { tech, scope, size },
+        fromTopic
+      );
       setTitle(lesson.title);
       setExplanation(lesson.explanation);
       setQuestion(lesson.question);
@@ -440,6 +451,62 @@ export default function RecallCircles() {
             : "🔊 Listen"}
       </button>
     ) : null;
+
+  const sliderControl = (
+    label: string,
+    value: number,
+    onChange: (n: number) => void,
+    valueLabel: string,
+    leftCaption: string,
+    rightCaption: string
+  ) => (
+    <div style={{ marginTop: 22 }}>
+      <div
+        style={{
+          display: "flex",
+          alignItems: "baseline",
+          justifyContent: "space-between",
+          marginBottom: 8,
+        }}
+      >
+        <label
+          style={{
+            fontSize: 13,
+            fontWeight: 600,
+            color: "#5C5345",
+            textTransform: "uppercase",
+            letterSpacing: ".08em",
+          }}
+        >
+          {label}
+        </label>
+        <span style={{ fontSize: 14, color: "#5C5345", fontWeight: 600 }}>
+          {valueLabel} <span style={{ opacity: 0.6 }}>· {value}/10</span>
+        </span>
+      </div>
+      <input
+        type="range"
+        min={SLIDER_MIN}
+        max={SLIDER_MAX}
+        step={1}
+        value={value}
+        onChange={(e) => onChange(Number(e.target.value))}
+        style={{ width: "100%", accentColor: "#E4572E", cursor: "pointer" }}
+      />
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "space-between",
+          marginTop: 4,
+          fontSize: 12,
+          color: "#9A8F7C",
+        }}
+      >
+        <span>{leftCaption}</span>
+        <span>{rightCaption}</span>
+      </div>
+    </div>
+  );
 
   const selectedCount = pickS.size + pickT.size;
 
@@ -788,54 +855,31 @@ export default function RecallCircles() {
               }}
             />
 
-            {/* technicality slider */}
-            <div style={{ marginTop: 24 }}>
-              <div
-                style={{
-                  display: "flex",
-                  alignItems: "baseline",
-                  justifyContent: "space-between",
-                  marginBottom: 10,
-                }}
-              >
-                <label
-                  style={{
-                    fontSize: 13,
-                    fontWeight: 600,
-                    color: "#5C5345",
-                    textTransform: "uppercase",
-                    letterSpacing: ".08em",
-                  }}
-                >
-                  How technical?
-                </label>
-                <span style={{ fontSize: 14, color: "#5C5345", fontWeight: 600 }}>
-                  {technicalityLabel(tech)}{" "}
-                  <span style={{ opacity: 0.6 }}>· {tech}/10</span>
-                </span>
-              </div>
-              <input
-                type="range"
-                min={TECH_MIN}
-                max={TECH_MAX}
-                step={1}
-                value={tech}
-                onChange={(e) => setTech(Number(e.target.value))}
-                style={{ width: "100%", accentColor: "#E4572E", cursor: "pointer" }}
-              />
-              <div
-                style={{
-                  display: "flex",
-                  justifyContent: "space-between",
-                  marginTop: 4,
-                  fontSize: 12,
-                  color: "#9A8F7C",
-                }}
-              >
-                <span>Plain &amp; everyday</span>
-                <span>Research-level</span>
-              </div>
-            </div>
+            {/* generation dials */}
+            {sliderControl(
+              "How technical?",
+              tech,
+              setTech,
+              technicalityLabel(tech),
+              "Plain & everyday",
+              "Research-level"
+            )}
+            {sliderControl(
+              "Scope",
+              scope,
+              setScope,
+              scopeLabel(scope),
+              "Just the question",
+              "Wider context"
+            )}
+            {sliderControl(
+              "Response size",
+              size,
+              setSize,
+              sizeLabel(size),
+              "Brief",
+              "In depth"
+            )}
 
             {error && (
               <p style={{ color: "#C0392B", fontSize: 14, marginTop: 18 }}>{error}</p>
