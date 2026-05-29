@@ -29,6 +29,7 @@ import {
   saveKey,
   saveQueue,
 } from "@/lib/storage";
+import { useTTS } from "@/lib/useTTS";
 import AnswerField from "./AnswerField";
 import SettingsModal from "./SettingsModal";
 
@@ -67,6 +68,8 @@ export default function RecallCircles() {
   const [reflectInput, setReflectInput] = useState("");
   const [tidying, setTidying] = useState(false);
   const [tidied, setTidied] = useState<string[] | null>(null);
+
+  const tts = useTTS();
 
   const responseRef = useRef("");
   const submittedRef = useRef(false);
@@ -138,6 +141,7 @@ export default function RecallCircles() {
         setPendingQueueId(null);
       }
       setPhase("explain");
+      if (tts.enabled) tts.speak(lesson.explanation);
     } catch (e) {
       setError(errorMessage(e));
       if (isAuthError(e)) {
@@ -163,6 +167,7 @@ export default function RecallCircles() {
   // Used both for the first question after the explanation and for "give it
   // another go" — both reset to a fresh ANSWER_SECONDS clock.
   function startQuestion() {
+    tts.stop(); // the explanation gets hidden now — don't keep narrating it
     setResponse("");
     setResult(null);
     submittedRef.current = false;
@@ -214,6 +219,7 @@ export default function RecallCircles() {
     submittedRef.current = true;
     setPhase("grading");
     setGraderError(false);
+    let spoken = "";
     try {
       const r = await respondToAnswer(apiKey, {
         explanation,
@@ -222,6 +228,7 @@ export default function RecallCircles() {
         answer: text || "",
       });
       setResult(r);
+      spoken = r.feedback;
     } catch (e) {
       if (isAuthError(e)) {
         setAuthError("That key was rejected — check it and try again.");
@@ -229,20 +236,24 @@ export default function RecallCircles() {
       }
       // Couldn't verify — don't trap the user; let them retry or wrap up.
       setGraderError(true);
+      const fallback =
+        "Couldn't reach the grader just now — the key idea: " +
+        (keyPoints.join("; ") || title) +
+        ".";
       setResult({
         verdict: "on the right track",
-        feedback:
-          "Couldn't reach the grader just now — the key idea: " +
-          (keyPoints.join("; ") || title) +
-          ".",
+        feedback: fallback,
         nextBranch: "",
       });
+      spoken = fallback;
     }
     setPhase("respond");
+    if (tts.enabled) tts.speak(spoken);
   }
 
   /* ------------------------------- reflect ------------------------------- */
   function startReflect() {
+    tts.stop();
     setReflectInput("");
     setTidied(null);
     setTidying(false);
@@ -250,6 +261,7 @@ export default function RecallCircles() {
   }
 
   function finishToInput() {
+    tts.stop();
     setReflectInput("");
     setTidied(null);
     setTidying(false);
@@ -325,6 +337,29 @@ export default function RecallCircles() {
     : apiKey
       ? "this session"
       : null;
+
+  const speakButton = (text: string) =>
+    tts.supported ? (
+      <button
+        className="rcb-btn"
+        onClick={() => (tts.status === "speaking" ? tts.stop() : tts.speak(text))}
+        style={{
+          padding: "11px 18px",
+          borderRadius: 12,
+          fontSize: 14,
+          fontWeight: 600,
+          background: "#FFFDF8",
+          color: "#17A398",
+          boxShadow: "inset 0 0 0 1.5px #BfE3DE",
+        }}
+      >
+        {tts.status === "speaking"
+          ? "⏹ Stop"
+          : tts.status === "loading"
+            ? "🔊 Loading voice…"
+            : "🔊 Listen"}
+      </button>
+    ) : null;
 
   const Breadcrumb = () =>
     trail.length > 0 ? (
@@ -404,26 +439,60 @@ export default function RecallCircles() {
               Recall Circles
             </h1>
           </div>
-          <button
-            className="rcb-btn"
-            onClick={() => {
-              setAuthError("");
-              setShowSettings(true);
-            }}
-            style={{
-              padding: "8px 14px",
-              borderRadius: 999,
-              fontSize: 13,
-              fontWeight: 600,
-              background: maskedHeaderKey ? "#FFFDF8" : "#211B14",
-              color: maskedHeaderKey ? "#5C5345" : "#F7F1E5",
-              boxShadow: maskedHeaderKey
-                ? "inset 0 0 0 1.5px #D8CBB2"
-                : "0 4px 14px rgba(33,27,20,.22)",
-            }}
-          >
-            {maskedHeaderKey ? `🔑 ${maskedHeaderKey}` : "🔑 Add your key"}
-          </button>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            {tts.supported && (
+              <button
+                className="rcb-btn"
+                onClick={tts.toggle}
+                title={
+                  tts.engine === "webgpu"
+                    ? "Read responses aloud (local neural voice on your GPU)"
+                    : "Read responses aloud (built-in browser voice)"
+                }
+                style={{
+                  padding: "8px 14px",
+                  borderRadius: 999,
+                  fontSize: 13,
+                  fontWeight: 600,
+                  background: tts.enabled ? "#17A398" : "#FFFDF8",
+                  color: tts.enabled ? "#fff" : "#5C5345",
+                  boxShadow: tts.enabled
+                    ? "0 4px 14px rgba(23,163,152,.3)"
+                    : "inset 0 0 0 1.5px #D8CBB2",
+                  animation:
+                    tts.enabled && tts.status === "speaking"
+                      ? "rcb-pulse 1.2s infinite"
+                      : "none",
+                }}
+              >
+                {tts.enabled
+                  ? tts.status === "loading"
+                    ? "🔊 loading voice…"
+                    : "🔊 Voice on"
+                  : "🔇 Voice off"}
+              </button>
+            )}
+            <button
+              className="rcb-btn"
+              onClick={() => {
+                setAuthError("");
+                setShowSettings(true);
+              }}
+              style={{
+                padding: "8px 14px",
+                borderRadius: 999,
+                fontSize: 13,
+                fontWeight: 600,
+                background: maskedHeaderKey ? "#FFFDF8" : "#211B14",
+                color: maskedHeaderKey ? "#5C5345" : "#F7F1E5",
+                boxShadow: maskedHeaderKey
+                  ? "inset 0 0 0 1.5px #D8CBB2"
+                  : "0 4px 14px rgba(33,27,20,.22)",
+              }}
+            >
+              {maskedHeaderKey ? `🔑 ${maskedHeaderKey}` : "🔑 Add your key"}
+            </button>
+          </div>
         </div>
         <p style={{ margin: "0 0 28px", color: "#7A6F5E", fontSize: 15 }}>
           Pick a topic. Read the explanation. Answer back. Branch onward.
@@ -762,6 +831,7 @@ export default function RecallCircles() {
               >
                 I&apos;m ready — quiz me →
               </button>
+              {speakButton(explanation)}
               <span style={{ fontSize: 14, color: "#9A8F7C" }}>
                 Tap when you&apos;ve got it, or let the clock decide.
               </span>
@@ -889,6 +959,10 @@ export default function RecallCircles() {
             >
               {result.feedback}
             </p>
+
+            {tts.supported && (
+              <div style={{ marginTop: 14 }}>{speakButton(result.feedback)}</div>
+            )}
 
             <div
               style={{
