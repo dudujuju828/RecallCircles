@@ -143,10 +143,13 @@ export default function RecallCircles() {
   }
 
   /* ------------------------ explain (generate lesson) --------------------- */
+  // trailMode: "reset" = brand-new session, "push" = new branch,
+  // "keep" = re-explain the current topic (don't grow the trail).
   async function runGenerate(
     targetTopic: string,
     fromTopic: string | null,
-    resetTrail: boolean
+    trailMode: "reset" | "push" | "keep",
+    remediate = false
   ) {
     const t = targetTopic.trim();
     if (!t) return;
@@ -161,7 +164,7 @@ export default function RecallCircles() {
       const lesson = await generateExplanation(
         apiKey,
         t,
-        { tech, scope, size },
+        { tech, scope, size, remediate },
         fromTopic
       );
       setTitle(lesson.title);
@@ -169,8 +172,13 @@ export default function RecallCircles() {
       setQuestion(lesson.question);
       setKeyPoints(lesson.keyPoints);
       setResult(null);
-      if (resetTrail) setHistory([]); // brand-new session — forget the old Q&A
-      setTrail((prev) => (resetTrail ? [lesson.title] : [...prev, lesson.title]));
+      if (trailMode === "reset") setHistory([]); // new session — forget old Q&A
+      setTrail((prev) => {
+        if (trailMode === "reset") return [lesson.title];
+        if (trailMode === "push") return [...prev, lesson.title];
+        // "keep" — re-explaining the same topic; refresh the current crumb.
+        return prev.length ? [...prev.slice(0, -1), lesson.title] : [lesson.title];
+      });
       // A queued curiosity has now become a round — retire it.
       if (pendingQueueId) {
         removeFromQueue(pendingQueueId);
@@ -189,14 +197,19 @@ export default function RecallCircles() {
   }
 
   function generateFromInput() {
-    runGenerate(topic, null, true);
+    runGenerate(topic, null, "reset");
   }
 
   function continueBranch() {
     const nb = result?.nextBranch?.trim();
     if (!nb) return;
     setTopic(nb);
-    runGenerate(nb, title, false);
+    runGenerate(nb, title, "push");
+  }
+
+  // After a "not quite": re-explain the same topic, deeper and reasoning-first.
+  function reexplainDeeper() {
+    runGenerate(topic, null, "keep", true);
   }
 
   /* ----------------------------- timed question ---------------------------- */
@@ -1314,6 +1327,7 @@ export default function RecallCircles() {
             {(() => {
               const correct = !graderError && result.verdict === "nailed it";
               const canBranch = correct && !!result.nextBranch.trim();
+              const notQuite = !graderError && result.verdict === "not quite";
               return (
                 <>
                   {canBranch && (
@@ -1352,6 +1366,13 @@ export default function RecallCircles() {
                     </div>
                   )}
 
+                  {notQuite && (
+                    <p style={{ marginTop: 20, color: "#7A6F5E", fontSize: 15, lineHeight: 1.5 }}>
+                      Let&apos;s take another run at it — here&apos;s a deeper
+                      explanation that walks through the reasoning.
+                    </p>
+                  )}
+
                   <div
                     style={{ display: "flex", gap: 12, marginTop: 22, flexWrap: "wrap" }}
                   >
@@ -1370,6 +1391,22 @@ export default function RecallCircles() {
                         }}
                       >
                         Continue → {result.nextBranch}
+                      </button>
+                    ) : notQuite ? (
+                      <button
+                        className="rcb-btn"
+                        onClick={reexplainDeeper}
+                        style={{
+                          padding: "14px 26px",
+                          borderRadius: 14,
+                          fontSize: 15,
+                          fontWeight: 700,
+                          background: "#E4572E",
+                          color: "#fff",
+                          boxShadow: "0 8px 22px rgba(228,87,46,.35)",
+                        }}
+                      >
+                        Explain it again, in more depth →
                       </button>
                     ) : (
                       <button

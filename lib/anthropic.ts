@@ -10,6 +10,8 @@ export interface GenOptions {
   tech: number;
   scope: number;
   size: number;
+  /** Re-explain after a "not quite": go deeper and foreground the reasoning. */
+  remediate?: boolean;
 }
 
 /*
@@ -156,6 +158,12 @@ Follow all three of these dials:
 - Scope (${opts.scope}/10): ${scopePrompt(opts.scope)}
 - Length (${opts.size}/10): ${sizePrompt(opts.size)}
 
+${
+  opts.remediate
+    ? `The learner just tried to explain this back and did NOT get the core idea. Go somewhat deeper than the length dial alone implies, and foreground the REASONING: walk through the causal why and how step by step — the chain of logic that makes the central idea click — rather than just stating facts or definitions.
+`
+    : ""
+}
 1. Explain the topic, obeying the technicality, scope, and length dials above. The explanation must stand alone and build logically.
 2. Pose ONE open-ended question testing whether the reader grasped the CENTRAL idea — a "why", "explain", or "what would happen if" question, never a lookup of an exact figure or name.
 3. List 1-3 short key points a correct answer must convey.
@@ -237,10 +245,12 @@ export async function generateExplanation(
   opts: GenOptions,
   fromTopic: string | null = null
 ): Promise<Lesson> {
+  // A "not quite" re-explanation gets a depth bump on top of the size dial.
+  const size = opts.remediate ? Math.min(10, opts.size + 2) : opts.size;
   const raw = await callClaude(
     apiKey,
-    buildExplainPrompt(topic, opts, fromTopic),
-    sizeMaxTokens(opts.size)
+    buildExplainPrompt(topic, { ...opts, size }, fromTopic),
+    sizeMaxTokens(size)
   );
   const parsed = parseJson<Partial<Lesson>>(raw);
   if (!parsed.explanation || typeof parsed.explanation !== "string") {
