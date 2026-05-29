@@ -8,7 +8,6 @@ import {
   TECH_DEFAULT,
   TECH_MAX,
   TECH_MIN,
-  colorOf,
   technicalityLabel,
 } from "@/lib/constants";
 import { fmt } from "@/lib/utils";
@@ -75,6 +74,9 @@ export default function RecallCircles() {
   // AI-suggested topics to look into next, based on how they answered.
   const [suggested, setSuggested] = useState<string[]>([]);
   const [suggesting, setSuggesting] = useState(false);
+  // Opt-in selection: nothing is queued unless the user picks it.
+  const [pickS, setPickS] = useState<Set<number>>(new Set());
+  const [pickT, setPickT] = useState<Set<number>>(new Set());
 
   // First-touch voice-model download overlay (delayed so cached loads don't flash).
   const [showVoiceOverlay, setShowVoiceOverlay] = useState(false);
@@ -289,6 +291,8 @@ export default function RecallCircles() {
     setTidying(false);
     setSuggested([]);
     setSuggesting(false);
+    setPickS(new Set());
+    setPickT(new Set());
     setPhase("reflect");
     // Pull a couple of "look into next" topics from how they answered.
     if (apiKey.trim() && history.length) runSuggest(history);
@@ -304,8 +308,20 @@ export default function RecallCircles() {
     setSuggesting(false);
   }
 
-  function removeSuggested(idx: number) {
-    setSuggested((s) => s.filter((_, i) => i !== idx));
+  function toggleSuggested(idx: number) {
+    setPickS((prev) => {
+      const next = new Set(prev);
+      next.has(idx) ? next.delete(idx) : next.add(idx);
+      return next;
+    });
+  }
+
+  function toggleTidied(idx: number) {
+    setPickT((prev) => {
+      const next = new Set(prev);
+      next.has(idx) ? next.delete(idx) : next.add(idx);
+      return next;
+    });
   }
 
   function finishToInput() {
@@ -315,6 +331,8 @@ export default function RecallCircles() {
     setTidying(false);
     setSuggested([]);
     setSuggesting(false);
+    setPickS(new Set());
+    setPickT(new Set());
     setHistory([]);
     setTopic("");
     setTrail([]);
@@ -346,15 +364,15 @@ export default function RecallCircles() {
     setTidying(false);
   }
 
-  function removeTidied(idx: number) {
-    setTidied((qs) => (qs ? qs.filter((_, i) => i !== idx) : qs));
-  }
-
   function saveReflect() {
-    // Merge AI suggestions + the user's tidied notes, de-duped case-insensitively.
+    // Only the rows the user actually selected get queued.
+    const chosen = [
+      ...suggested.filter((_, i) => pickS.has(i)),
+      ...(tidied || []).filter((_, i) => pickT.has(i)),
+    ];
     const seen = new Set<string>();
     const texts: string[] = [];
-    for (const text of [...suggested, ...(tidied || [])]) {
+    for (const text of chosen) {
       const key = text.trim().toLowerCase();
       if (!key || seen.has(key)) continue;
       seen.add(key);
@@ -423,84 +441,68 @@ export default function RecallCircles() {
       </button>
     ) : null;
 
-  const suggestionBlock = (label: string) => {
-    if (!suggesting && suggested.length === 0) return null;
-    return (
-      <div style={{ marginBottom: 22 }}>
-        <p
-          style={{
-            fontSize: 12,
-            fontWeight: 700,
-            color: "#6A994E",
-            textTransform: "uppercase",
-            letterSpacing: ".08em",
-            margin: "0 0 10px",
-          }}
-        >
-          {label}
-        </p>
-        {suggesting ? (
-          <div
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: 10,
-              color: "#5C5345",
-              fontFamily: "'Fraunces',serif",
-              fontSize: 16,
-            }}
-          >
-            <span className="rcb-spinner" /> Reading how you answered…
-          </div>
-        ) : (
-          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-            {suggested.map((s, idx) => (
-              <div
-                key={idx}
-                style={{
-                  display: "flex",
-                  alignItems: "flex-start",
-                  gap: 12,
-                  padding: "14px 16px",
-                  borderRadius: 14,
-                  background: "#EDF5E6",
-                  border: "1px solid #A9CC8E",
-                }}
-              >
-                <span style={{ flexShrink: 0, fontSize: 16, paddingTop: 1 }}>✨</span>
-                <span
-                  style={{
-                    flex: 1,
-                    fontFamily: "'Newsreader', serif",
-                    fontSize: 17,
-                    lineHeight: 1.4,
-                    color: "#2B241B",
-                  }}
-                >
-                  {s}
-                </span>
-                <button
-                  className="rcb-btn"
-                  aria-label="Remove"
-                  onClick={() => removeSuggested(idx)}
-                  style={{
-                    background: "transparent",
-                    color: "#7FA968",
-                    fontSize: 18,
-                    lineHeight: 1,
-                    padding: "0 4px",
-                    fontWeight: 700,
-                  }}
-                >
-                  ×
-                </button>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
-    );
-  };
+  const selectedCount = pickS.size + pickT.size;
+
+  // A tappable row that opts a question into the queue. Unselected by default —
+  // you have to pick what you want saved.
+  const pickRow = (
+    key: string,
+    text: string,
+    picked: boolean,
+    onToggle: () => void,
+    accent: string
+  ) => (
+    <button
+      key={key}
+      type="button"
+      className="rcb-btn"
+      onClick={onToggle}
+      style={{
+        display: "flex",
+        alignItems: "flex-start",
+        gap: 12,
+        padding: "14px 16px",
+        borderRadius: 14,
+        width: "100%",
+        textAlign: "left",
+        background: picked ? "#FFFDF8" : "#F3ECDD",
+        boxShadow: picked
+          ? `inset 0 0 0 2px ${accent}`
+          : "inset 0 0 0 1.5px #E4D8C0",
+        opacity: picked ? 1 : 0.72,
+      }}
+    >
+      <span
+        style={{
+          flexShrink: 0,
+          width: 24,
+          height: 24,
+          borderRadius: "50%",
+          background: picked ? accent : "transparent",
+          border: picked ? "none" : "1.5px solid #C9BBA0",
+          color: "#fff",
+          fontSize: 13,
+          fontWeight: 700,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+        }}
+      >
+        {picked ? "✓" : ""}
+      </span>
+      <span
+        style={{
+          flex: 1,
+          fontFamily: "'Newsreader', serif",
+          fontSize: 17,
+          lineHeight: 1.4,
+          color: "#2B241B",
+        }}
+      >
+        {text}
+      </span>
+    </button>
+  );
 
   const Breadcrumb = () =>
     trail.length > 0 ? (
@@ -1394,9 +1396,9 @@ export default function RecallCircles() {
                 </h2>
                 <p style={{ margin: "0 0 20px", color: "#7A6F5E", fontSize: 15, lineHeight: 1.5 }}>
                   Dump whatever&apos;s rattling around — half-formed is fine. We&apos;ll
-                  tidy it into clean questions you can study later.
+                  tidy it into questions, and suggest a couple based on how you answered —
+                  then you pick which to save.
                 </p>
-                {suggestionBlock("From how you answered — worth a look")}
                 {tidying ? (
                   <div
                     style={{
@@ -1423,7 +1425,7 @@ export default function RecallCircles() {
                       <button
                         className="rcb-btn"
                         onClick={submitReflect}
-                        disabled={!reflectInput.trim() && suggested.length === 0}
+                        disabled={!reflectInput.trim() && suggested.length === 0 && !suggesting}
                         style={{
                           padding: "14px 26px",
                           borderRadius: 14,
@@ -1464,19 +1466,58 @@ export default function RecallCircles() {
                     color: "#9A8F7C",
                     textTransform: "uppercase",
                     letterSpacing: ".1em",
-                    margin: "0 0 12px",
+                    margin: "0 0 6px",
                   }}
                 >
-                  {suggested.length || tidied.length ? "Save these for later?" : "Nothing to save"}
+                  {suggested.length || (tidied && tidied.length)
+                    ? "Tap to choose what to save"
+                    : "Nothing to save"}
                 </p>
-                {suggestionBlock("Suggested from your answers")}
-                {tidied.length === 0 && reflectInput.trim() && (
-                  <p style={{ color: "#7A6F5E", fontSize: 16, margin: "0 0 18px" }}>
-                    Couldn&apos;t pull a clear question out of your notes — no worries.
+                {(suggested.length > 0 || (tidied && tidied.length > 0)) && (
+                  <p style={{ margin: "0 0 18px", color: "#7A6F5E", fontSize: 14 }}>
+                    Nothing is added unless you pick it.
                   </p>
                 )}
-                {tidied.length > 0 && (
-                  <>
+
+                {(suggesting || suggested.length > 0) && (
+                  <div style={{ marginBottom: 20 }}>
+                    <p
+                      style={{
+                        fontSize: 12,
+                        fontWeight: 700,
+                        color: "#6A994E",
+                        textTransform: "uppercase",
+                        letterSpacing: ".08em",
+                        margin: "0 0 10px",
+                      }}
+                    >
+                      Suggested from your answers
+                    </p>
+                    {suggesting ? (
+                      <div
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          gap: 10,
+                          color: "#5C5345",
+                          fontFamily: "'Fraunces',serif",
+                          fontSize: 16,
+                        }}
+                      >
+                        <span className="rcb-spinner" /> Reading how you answered…
+                      </div>
+                    ) : (
+                      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                        {suggested.map((s, idx) =>
+                          pickRow(`s${idx}`, s, pickS.has(idx), () => toggleSuggested(idx), "#6A994E")
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {tidied && tidied.length > 0 && (
+                  <div style={{ marginBottom: 20 }}>
                     <p
                       style={{
                         fontSize: 12,
@@ -1489,68 +1530,24 @@ export default function RecallCircles() {
                     >
                       From your notes
                     </p>
-                    <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 20 }}>
-                    {tidied.map((q, idx) => (
-                      <div
-                        key={idx}
-                        style={{
-                          display: "flex",
-                          alignItems: "flex-start",
-                          gap: 12,
-                          padding: "14px 16px",
-                          borderRadius: 14,
-                          background: "#FFFDF8",
-                          border: "1px solid #E4D8C0",
-                        }}
-                      >
-                        <span
-                          style={{
-                            flexShrink: 0,
-                            width: 24,
-                            height: 24,
-                            borderRadius: "50%",
-                            background: colorOf(idx),
-                            color: "#fff",
-                            fontSize: 12,
-                            fontWeight: 700,
-                            display: "flex",
-                            alignItems: "center",
-                            justifyContent: "center",
-                          }}
-                        >
-                          {idx + 1}
-                        </span>
-                        <span
-                          style={{
-                            flex: 1,
-                            fontFamily: "'Newsreader', serif",
-                            fontSize: 17,
-                            lineHeight: 1.4,
-                            color: "#2B241B",
-                          }}
-                        >
-                          {q}
-                        </span>
-                        <button
-                          className="rcb-btn"
-                          aria-label="Remove"
-                          onClick={() => removeTidied(idx)}
-                          style={{
-                            background: "transparent",
-                            color: "#B6A98E",
-                            fontSize: 18,
-                            lineHeight: 1,
-                            padding: "0 4px",
-                            fontWeight: 700,
-                          }}
-                        >
-                          ×
-                        </button>
-                      </div>
-                    ))}
+                    <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                      {tidied.map((q, idx) =>
+                        pickRow(`t${idx}`, q, pickT.has(idx), () => toggleTidied(idx), "#E4572E")
+                      )}
                     </div>
-                  </>
+                  </div>
                 )}
+
+                {!suggesting &&
+                  suggested.length === 0 &&
+                  (!tidied || tidied.length === 0) && (
+                    <p style={{ color: "#7A6F5E", fontSize: 16, margin: "0 0 18px" }}>
+                      {reflectInput.trim()
+                        ? "Couldn't pull a clear question out of your notes — no worries."
+                        : "Nothing to save — no worries."}
+                    </p>
+                  )}
+
                 <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
                   <button
                     className="rcb-btn"
@@ -1565,9 +1562,9 @@ export default function RecallCircles() {
                       boxShadow: "0 8px 22px rgba(228,87,46,.35)",
                     }}
                   >
-                    {suggested.length || tidied.length ? "Save to my list →" : "Done →"}
+                    {selectedCount > 0 ? `Add ${selectedCount} to my list →` : "Done →"}
                   </button>
-                  {(suggested.length > 0 || tidied.length > 0) && (
+                  {selectedCount > 0 && (
                     <button
                       className="rcb-btn"
                       onClick={finishToInput}
@@ -1581,7 +1578,7 @@ export default function RecallCircles() {
                         boxShadow: "inset 0 0 0 1.5px #D8CBB2",
                       }}
                     >
-                      Skip saving
+                      Discard
                     </button>
                   )}
                 </div>
