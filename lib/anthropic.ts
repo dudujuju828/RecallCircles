@@ -1,4 +1,10 @@
-import type { AnswerRecord, Lesson, Response, Verdict } from "./types";
+import type {
+  AnswerRecord,
+  Lesson,
+  LessonPlan,
+  Response,
+  Verdict,
+} from "./types";
 import {
   scopePrompt,
   sizeMaxTokens,
@@ -245,8 +251,43 @@ Connect to it in a sentence so the thread is continuous, then make the new expla
 function buildExplainPrompt(
   topic: string,
   opts: GenOptions,
-  context: GenContext | null
+  context: GenContext | null,
+  fixedQuestion: string | null,
+  covered: string[]
 ): string {
+  const remediateLine =
+    opts.remediate === "deep"
+      ? `The learner just tried to answer and did NOT get the core idea. Go somewhat deeper than the length dial alone implies, and foreground the REASONING: walk through the causal why and how step by step — the chain of logic that makes the idea click — rather than just stating facts or definitions.
+`
+      : opts.remediate === "light"
+        ? `The learner was on the right track but didn't fully nail the idea. Give a slightly fuller and clearer explanation than usual, adding a little more detail and a crisper through-line that sharpens and reinforces the idea they nearly had.
+`
+        : "";
+
+  if (fixedQuestion) {
+    // Lesson-plan step: the question is fixed; teach toward it.
+    const coveredLine = covered.length
+      ? `Earlier steps in this lesson already covered: ${covered
+          .map((q) => `"${q}"`)
+          .join("; ")}. Build on those without repeating them.\n`
+      : "";
+    return `You are teaching "${topic}" as a guided lesson, one question at a time.
+
+The learner must end up able to answer THIS exact question well:
+"${fixedQuestion}"
+${coveredLine}${context ? "\n" + buildContextBlock(context) + "\n" : ""}
+Follow all three of these dials:
+- Technicality (${opts.tech}/10): ${technicalityPrompt(opts.tech)}
+- Scope (${opts.scope}/10): ${scopePrompt(opts.scope)}
+- Length (${opts.size}/10): ${sizePrompt(opts.size)}
+
+${remediateLine}1. Write an explanation that teaches exactly what the learner needs to answer the question above well, obeying the dials. It must stand alone and build logically.
+2. List 1-3 short key points a correct answer to that question must convey.
+
+Respond with ONLY valid JSON, no preamble and no code fences:
+{"title":"2-4 word title","explanation":"...","keyPoints":["...",...]}`;
+  }
+
   return `You are the engine of a study loop: the learner picks a topic, you explain it, then you pose one question that tests whether they grasped the core idea.
 
 Topic: "${topic}"
@@ -256,21 +297,34 @@ Follow all three of these dials:
 - Scope (${opts.scope}/10): ${scopePrompt(opts.scope)}
 - Length (${opts.size}/10): ${sizePrompt(opts.size)}
 
-${
-  opts.remediate === "deep"
-    ? `The learner just tried to explain this back and did NOT get the core idea. Go somewhat deeper than the length dial alone implies, and foreground the REASONING: walk through the causal why and how step by step — the chain of logic that makes the central idea click — rather than just stating facts or definitions.
-`
-    : opts.remediate === "light"
-      ? `The learner was on the right track but didn't fully nail the core idea. Give a slightly fuller and clearer explanation than usual, adding a little more detail and a crisper through-line that sharpens and reinforces the central idea they nearly had.
-`
-      : ""
-}
-1. Explain the topic, obeying the technicality, scope, and length dials above. The explanation must stand alone and build logically.
+${remediateLine}1. Explain the topic, obeying the technicality, scope, and length dials above. The explanation must stand alone and build logically.
 2. Pose ONE open-ended question testing whether the reader grasped the CENTRAL idea — a "why", "explain", or "what would happen if" question, never a lookup of an exact figure or name.
 3. List 1-3 short key points a correct answer must convey.
 
 Respond with ONLY valid JSON, no preamble and no code fences:
 {"title":"2-4 word title","explanation":"...","question":"...","keyPoints":["...",...]}`;
+}
+
+function buildLessonPlanPrompt(topic: string, count: number, tech: number): string {
+  return `You are designing a self-contained lesson that teaches "${topic}" through an ordered sequence of EXACTLY ${count} questions. Working through all of them in order should be enough to give the learner a solid understanding of the topic.
+
+Use the classic question lenses, mixed and ordered to build understanding:
+- what (definition / what it is)
+- why (cause, purpose, significance)
+- how (mechanism / process / steps)
+- what-if or so-what (implications, consequences, edge cases)
+- and others (when, compare/contrast, how-do-we-know) where they genuinely fit.
+
+Order them pedagogically: start foundational (a "what"), build through "why" and "how", and finish with synthesis or implications. Each question must:
+- stand on its own (name the subject explicitly — no "it"/"this"/"that"),
+- be open-ended (answerable in a sentence or two, never a yes/no or a lookup of an exact figure or name),
+- not duplicate another.
+
+Calibrate difficulty to technicality ${tech}/10.
+
+Respond with ONLY valid JSON, no preamble and no code fences:
+{"title":"2-4 word lesson title","questions":["...", ...]}
+questions must have EXACTLY ${count} items in teaching order.`;
 }
 
 function buildRespondPrompt(p: {
@@ -344,7 +398,9 @@ export async function generateExplanation(
   apiKey: string,
   topic: string,
   opts: GenOptions,
-  context: GenContext | null = null
+  context: GenContext | null = null,
+  fixedQuestion: string | null = null,
+  covered: string[] = []
 ): Promise<Lesson> {
   // A re-explanation bumps length on top of the size dial: deeper for a
   // "not quite", a touch fuller for "on the right track".
@@ -352,7 +408,7 @@ export async function generateExplanation(
   const size = Math.min(10, opts.size + bump);
   const raw = await callClaude(
     apiKey,
-    buildExplainPrompt(topic, { ...opts, size }, context),
+    buildExplainPrompt(topic, { ...opts, size }, context, fixedQuestion, covered),
     sizeMaxTokens(size)
   );
   const parsed = parseJson<Partial<Lesson>>(raw);
@@ -365,10 +421,38 @@ export async function generateExplanation(
   return {
     title: String(parsed.title || topic).trim(),
     explanation: String(parsed.explanation).trim(),
-    question: String(parsed.question ?? "").trim(),
+    // In lesson-plan mode the question is fixed; otherwise take the model's.
+    question: fixedQuestion ?? String(parsed.question ?? "").trim(),
     keyPoints: Array.isArray(parsed.keyPoints)
       ? parsed.keyPoints.map((k) => String(k).trim()).filter(Boolean)
       : [],
+  };
+}
+
+export async function generateLessonPlan(
+  apiKey: string,
+  topic: string,
+  count: number,
+  tech: number
+): Promise<LessonPlan> {
+  const raw = await callClaude(
+    apiKey,
+    buildLessonPlanPrompt(topic, count, tech),
+    1024
+  );
+  const parsed = parseJson<Partial<LessonPlan>>(raw);
+  const questions = Array.isArray(parsed.questions)
+    ? parsed.questions.map((q) => String(q).trim()).filter(Boolean)
+    : [];
+  if (!questions.length) {
+    throw new AnthropicError(
+      "parse",
+      "Couldn't draft a lesson for that — try rephrasing the topic."
+    );
+  }
+  return {
+    title: String(parsed.title || topic).trim(),
+    questions: questions.slice(0, count),
   };
 }
 

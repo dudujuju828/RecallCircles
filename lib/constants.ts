@@ -12,6 +12,11 @@ export const COLORS = [
 export const ANSWER_SECONDS = 120;
 export const READ_SECONDS = 180;
 
+// Lesson plan: how many questions to teach a topic through.
+export const PLAN_MIN = 3;
+export const PLAN_MAX = 8;
+export const PLAN_DEFAULT = 6;
+
 /* ----------------------------- technicality ----------------------------- */
 
 // All three sliders share a 1–10 range.

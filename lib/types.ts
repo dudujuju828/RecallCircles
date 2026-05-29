@@ -1,6 +1,7 @@
 export type Phase =
   | "input"
   | "loading"
+  | "plan"
   | "explain"
   | "question"
   | "grading"
@@ -34,6 +35,12 @@ export interface QueueItem {
   text: string;
   createdAt: number;
   sourceTopic: string;
+}
+
+/** A generated "Lesson plan": a topic taught through an ordered set of questions. */
+export interface LessonPlan {
+  title: string;
+  questions: string[];
 }
 
 /** One answered question in a session — fed to the "suggest next" call. */

@@ -4,6 +4,9 @@ import { useEffect, useRef, useState } from "react";
 import {
   ANSWER_SECONDS,
   COLORS,
+  PLAN_DEFAULT,
+  PLAN_MAX,
+  PLAN_MIN,
   READ_SECONDS,
   SCOPE_DEFAULT,
   SIZE_DEFAULT,
@@ -15,11 +18,18 @@ import {
   technicalityLabel,
 } from "@/lib/constants";
 import { fmt } from "@/lib/utils";
-import type { AnswerRecord, Phase, QueueItem, Response } from "@/lib/types";
+import type {
+  AnswerRecord,
+  LessonPlan,
+  Phase,
+  QueueItem,
+  Response,
+} from "@/lib/types";
 import type { GenContext } from "@/lib/anthropic";
 import {
   errorMessage,
   generateExplanation,
+  generateLessonPlan,
   isAuthError,
   respondToAnswer,
   splitThoughts,
@@ -60,6 +70,17 @@ export default function RecallCircles() {
   const [tech, setTech] = useState(TECH_DEFAULT);
   const [scope, setScope] = useState(SCOPE_DEFAULT);
   const [size, setSize] = useState(SIZE_DEFAULT);
+
+  // Input-screen mode: free "explore" loop vs a guided "lesson plan".
+  const [mode, setMode] = useState<"explore" | "plan">("explore");
+  const [loadingText, setLoadingText] = useState("Writing your explanation…");
+
+  // Lesson-plan state.
+  const [planCount, setPlanCount] = useState(PLAN_DEFAULT);
+  const [plan, setPlan] = useState<LessonPlan | null>(null);
+  const [planTopic, setPlanTopic] = useState("");
+  const [planIndex, setPlanIndex] = useState(0);
+  const [planActive, setPlanActive] = useState(false);
 
   const [title, setTitle] = useState("");
   const [explanation, setExplanation] = useState("");
@@ -183,15 +204,18 @@ export default function RecallCircles() {
 
   /* ------------------------ explain (generate lesson) --------------------- */
   // trailMode: "reset" = brand-new session, "push" = new branch/dig-in,
-  // "keep" = re-explain the current topic (don't grow the trail).
+  // "keep" = re-explain the current topic (refresh crumb), "none" = leave the
+  // trail alone (lesson-plan steps manage their own progress).
   // dials are passed explicitly so a sub-question can use its own without
-  // racing React state.
+  // racing React state. fixedQuestion/covered drive lesson-plan steps.
   async function runGenerate(
     targetTopic: string,
     context: GenContext | null,
-    trailMode: "reset" | "push" | "keep",
+    trailMode: "reset" | "push" | "keep" | "none",
     dials: { tech: number; scope: number; size: number },
-    remediate: "light" | "deep" | null = null
+    remediate: "light" | "deep" | null = null,
+    fixedQuestion: string | null = null,
+    covered: string[] = []
   ) {
     const t = targetTopic.trim();
     if (!t) return;
@@ -200,6 +224,9 @@ export default function RecallCircles() {
       setShowSettings(true);
       return;
     }
+    setLoadingText(
+      fixedQuestion ? "Preparing the next question…" : "Writing your explanation…"
+    );
     setPhase("loading");
     setError("");
     try {
@@ -207,7 +234,9 @@ export default function RecallCircles() {
         apiKey,
         t,
         { ...dials, remediate },
-        context
+        context,
+        fixedQuestion,
+        covered
       );
       setTitle(lesson.title);
       setExplanation(lesson.explanation);
@@ -220,6 +249,7 @@ export default function RecallCircles() {
         setAnswerSeconds(ANSWER_SECONDS);
       }
       setTrail((prev) => {
+        if (trailMode === "none") return prev;
         if (trailMode === "reset") return [lesson.title];
         if (trailMode === "push") return [...prev, lesson.title];
         // "keep" — re-explaining the same topic; refresh the current crumb.
@@ -238,12 +268,80 @@ export default function RecallCircles() {
         setAuthError("That key was rejected — check it and try again.");
         setShowSettings(true);
       }
-      setPhase("input");
+      // On a lesson step, failing drops back to the plan, not the input screen.
+      setPhase(planActive ? "plan" : "input");
     }
   }
 
   function generateFromInput() {
+    setPlanActive(false);
     runGenerate(topic, null, "reset", { tech, scope, size });
+  }
+
+  /* ------------------------------ lesson plan ----------------------------- */
+  async function buildPlan() {
+    const t = topic.trim();
+    if (!t) return;
+    if (!apiKey.trim()) {
+      setError("Add your Anthropic key to begin.");
+      setShowSettings(true);
+      return;
+    }
+    setLoadingText("Designing your lesson…");
+    setPhase("loading");
+    setError("");
+    try {
+      const p = await generateLessonPlan(apiKey, t, planCount, tech);
+      setPlan(p);
+      setPlanTopic(t);
+      setPhase("plan");
+    } catch (e) {
+      setError(errorMessage(e));
+      if (isAuthError(e)) {
+        setAuthError("That key was rejected — check it and try again.");
+        setShowSettings(true);
+      }
+      setPhase("input");
+    }
+  }
+
+  function removePlanQuestion(idx: number) {
+    setPlan((p) =>
+      p ? { ...p, questions: p.questions.filter((_, i) => i !== idx) } : p
+    );
+  }
+
+  function startLesson() {
+    if (!plan || plan.questions.length === 0) return;
+    // A lesson is its own session.
+    setHistory([]);
+    setStack([]);
+    setAnswerSeconds(ANSWER_SECONDS);
+    setPlanActive(true);
+    setPlanIndex(0);
+    setTrail([plan.title]);
+    runLessonStep(0);
+  }
+
+  // Generate (or re-generate) the explanation that teaches plan question `index`.
+  function runLessonStep(index: number, remediate: "light" | "deep" | null = null) {
+    if (!plan) return;
+    const q = plan.questions[index];
+    if (!q) return;
+    const covered = plan.questions.slice(0, index);
+    const ctx = remediate ? priorContext("reexplain") : null;
+    runGenerate(planTopic, ctx, "none", { tech, scope, size }, remediate, q, covered);
+  }
+
+  function nextPlanQuestion() {
+    if (!plan) return;
+    const next = planIndex + 1;
+    if (next >= plan.questions.length) {
+      startReflect(); // lesson complete → wrap up
+      return;
+    }
+    setPlanIndex(next);
+    runLessonStep(next);
   }
 
   function continueBranch() {
@@ -256,7 +354,13 @@ export default function RecallCircles() {
   // Re-explain the same topic after an imperfect answer: "light" = a touch
   // fuller (on the right track), "deep" = deeper + reasoning-first (not quite).
   // Injects the learner's actual answer + feedback so it targets the real gap.
+  // In a lesson plan (and not inside a sub-question), re-teach the SAME fixed
+  // plan question rather than letting the model improvise a new one.
   function reexplain(level: "light" | "deep") {
+    if (planActive && stack.length === 0) {
+      runLessonStep(planIndex, level);
+      return;
+    }
     runGenerate(topic, priorContext("reexplain"), "keep", { tech, scope, size }, level);
   }
 
@@ -450,6 +554,10 @@ export default function RecallCircles() {
     setAskingSub(false);
     setSubText("");
     setAnswerSeconds(ANSWER_SECONDS);
+    setPlanActive(false);
+    setPlan(null);
+    setPlanIndex(0);
+    setPlanTopic("");
     setTopic("");
     setTrail([]);
     setResult(null);
@@ -563,7 +671,9 @@ export default function RecallCircles() {
     onChange: (n: number) => void,
     valueLabel: string,
     leftCaption: string,
-    rightCaption: string
+    rightCaption: string,
+    min: number = SLIDER_MIN,
+    max: number = SLIDER_MAX
   ) => (
     <div style={{ marginTop: 22 }}>
       <div
@@ -586,13 +696,13 @@ export default function RecallCircles() {
           {label}
         </label>
         <span style={{ fontSize: 14, color: "#5C5345", fontWeight: 600 }}>
-          {valueLabel} <span style={{ opacity: 0.6 }}>· {value}/10</span>
+          {valueLabel} <span style={{ opacity: 0.6 }}>· {value}/{max}</span>
         </span>
       </div>
       <input
         type="range"
-        min={SLIDER_MIN}
-        max={SLIDER_MAX}
+        min={min}
+        max={max}
         step={1}
         value={value}
         onChange={(e) => onChange(Number(e.target.value))}
@@ -696,6 +806,42 @@ export default function RecallCircles() {
         ))}
       </p>
     ) : null;
+
+  // Lesson-plan progress: "Lesson · Question N of M" + a segmented bar.
+  const LessonProgress = () => {
+    if (!plan) return null;
+    const total = plan.questions.length;
+    return (
+      <div style={{ marginBottom: 16 }}>
+        <p
+          style={{
+            fontSize: 12,
+            fontWeight: 700,
+            color: "#9A8F7C",
+            textTransform: "uppercase",
+            letterSpacing: ".1em",
+            margin: "0 0 8px",
+          }}
+        >
+          {plan.title} · Question {planIndex + 1} of {total}
+        </p>
+        <div style={{ display: "flex", gap: 5 }}>
+          {plan.questions.map((_, i) => (
+            <div
+              key={i}
+              style={{
+                flex: 1,
+                height: 5,
+                borderRadius: 3,
+                background:
+                  i < planIndex ? "#6A994E" : i === planIndex ? "#E4572E" : "#E7DCC6",
+              }}
+            />
+          ))}
+        </div>
+      </div>
+    );
+  };
 
   /* ------------------------------- shell -------------------------------- */
   return (
@@ -927,8 +1073,52 @@ export default function RecallCircles() {
         {/* ----------------------------- INPUT ----------------------------- */}
         {phase === "input" && (
           <div style={{ animation: "rcb-fadeup .4s both" }}>
+            {/* mode toggle: free explore vs guided lesson plan */}
+            <div
+              style={{
+                display: "inline-flex",
+                gap: 4,
+                padding: 4,
+                marginBottom: 22,
+                borderRadius: 999,
+                background: "#F2EADB",
+                boxShadow: "inset 0 0 0 1.5px #E4D8C0",
+              }}
+            >
+              {(
+                [
+                  ["explore", "Explore"],
+                  ["plan", "Lesson plan"],
+                ] as [typeof mode, string][]
+              ).map(([key, label]) => {
+                const on = mode === key;
+                return (
+                  <button
+                    key={key}
+                    className="rcb-btn"
+                    onClick={() => {
+                      setMode(key);
+                      setError("");
+                    }}
+                    style={{
+                      padding: "9px 18px",
+                      borderRadius: 999,
+                      fontSize: 14,
+                      fontWeight: 700,
+                      background: on ? "#211B14" : "transparent",
+                      color: on ? "#F7F1E5" : "#7A6F5E",
+                      boxShadow: on ? "0 4px 14px rgba(33,27,20,.22)" : "none",
+                    }}
+                  >
+                    {label}
+                  </button>
+                );
+              })}
+            </div>
+
             <label
               style={{
+                display: "block",
                 fontSize: 13,
                 fontWeight: 600,
                 color: "#5C5345",
@@ -936,7 +1126,9 @@ export default function RecallCircles() {
                 letterSpacing: ".08em",
               }}
             >
-              What do you want to learn?
+              {mode === "plan"
+                ? "What topic should the lesson teach?"
+                : "What do you want to learn?"}
             </label>
             <input
               value={topic}
@@ -944,7 +1136,9 @@ export default function RecallCircles() {
                 setTopic(e.target.value);
                 if (pendingQueueId) setPendingQueueId(null);
               }}
-              onKeyDown={(e) => e.key === "Enter" && generateFromInput()}
+              onKeyDown={(e) =>
+                e.key === "Enter" && (mode === "plan" ? buildPlan() : generateFromInput())
+              }
               placeholder="e.g. how a black hole forms, the French Revolution, photosynthesis…"
               style={{
                 width: "100%",
@@ -986,12 +1180,32 @@ export default function RecallCircles() {
               "In depth"
             )}
 
+            {mode === "plan" &&
+              sliderControl(
+                "How many questions?",
+                planCount,
+                setPlanCount,
+                `${planCount} questions`,
+                `${PLAN_MIN}`,
+                `${PLAN_MAX}`,
+                PLAN_MIN,
+                PLAN_MAX
+              )}
+
+            {mode === "plan" && (
+              <p style={{ margin: "16px 0 0", color: "#7A6F5E", fontSize: 14, lineHeight: 1.5 }}>
+                We&apos;ll design a lesson that teaches this topic through a sequence of
+                questions. Answer each one to move to the next — finish them all and
+                you&apos;ll have the topic down.
+              </p>
+            )}
+
             {error && (
               <p style={{ color: "#C0392B", fontSize: 14, marginTop: 18 }}>{error}</p>
             )}
             <button
               className="rcb-btn"
-              onClick={generateFromInput}
+              onClick={mode === "plan" ? buildPlan : generateFromInput}
               disabled={!topic.trim()}
               style={{
                 marginTop: 26,
@@ -1004,7 +1218,7 @@ export default function RecallCircles() {
                 boxShadow: "0 8px 22px rgba(228,87,46,.35)",
               }}
             >
-              Explain it →
+              {mode === "plan" ? "Build lesson plan →" : "Explain it →"}
             </button>
 
             {/* look-into-next queue */}
@@ -1121,14 +1335,148 @@ export default function RecallCircles() {
               ))}
             </div>
             <p style={{ fontFamily: "'Fraunces', serif", fontSize: 20, color: "#5C5345" }}>
-              {phase === "loading" ? "Writing your explanation…" : "Reading your answer…"}
+              {phase === "loading" ? loadingText : "Reading your answer…"}
             </p>
+          </div>
+        )}
+
+        {/* ----------------------------- PLAN REVIEW ----------------------------- */}
+        {phase === "plan" && plan && (
+          <div style={{ animation: "rcb-fadeup .4s both" }}>
+            <p
+              style={{
+                fontSize: 13,
+                fontWeight: 600,
+                color: "#9A8F7C",
+                textTransform: "uppercase",
+                letterSpacing: ".1em",
+                margin: "0 0 8px",
+              }}
+            >
+              Your lesson plan
+            </p>
+            <h2
+              style={{
+                fontFamily: "'Fraunces', serif",
+                fontWeight: 600,
+                fontSize: 28,
+                margin: "0 0 8px",
+                lineHeight: 1.2,
+              }}
+            >
+              {plan.title}
+            </h2>
+            <p style={{ margin: "0 0 20px", color: "#7A6F5E", fontSize: 15, lineHeight: 1.5 }}>
+              {plan.questions.length} question{plan.questions.length === 1 ? "" : "s"},
+              taught one at a time. Remove any you don&apos;t want, then start.
+            </p>
+
+            <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 24 }}>
+              {plan.questions.map((q, idx) => (
+                <div
+                  key={idx}
+                  style={{
+                    display: "flex",
+                    alignItems: "flex-start",
+                    gap: 12,
+                    padding: "14px 16px",
+                    borderRadius: 14,
+                    background: "#FFFDF8",
+                    border: "1px solid #E4D8C0",
+                  }}
+                >
+                  <span
+                    style={{
+                      flexShrink: 0,
+                      width: 26,
+                      height: 26,
+                      borderRadius: "50%",
+                      background: COLORS[idx % COLORS.length],
+                      color: "#fff",
+                      fontSize: 13,
+                      fontWeight: 700,
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                    }}
+                  >
+                    {idx + 1}
+                  </span>
+                  <span
+                    style={{
+                      flex: 1,
+                      fontFamily: "'Newsreader', serif",
+                      fontSize: 17,
+                      lineHeight: 1.4,
+                      color: "#2B241B",
+                    }}
+                  >
+                    {q}
+                  </span>
+                  {plan.questions.length > 1 && (
+                    <button
+                      className="rcb-btn"
+                      aria-label="Remove question"
+                      onClick={() => removePlanQuestion(idx)}
+                      style={{
+                        background: "transparent",
+                        color: "#B6A98E",
+                        fontSize: 18,
+                        lineHeight: 1,
+                        padding: "0 4px",
+                        fontWeight: 700,
+                      }}
+                    >
+                      ×
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
+
+            <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+              <button
+                className="rcb-btn"
+                onClick={startLesson}
+                disabled={plan.questions.length === 0}
+                style={{
+                  padding: "15px 30px",
+                  borderRadius: 14,
+                  fontSize: 16,
+                  fontWeight: 700,
+                  background: "#E4572E",
+                  color: "#fff",
+                  boxShadow: "0 8px 22px rgba(228,87,46,.35)",
+                }}
+              >
+                Start lesson →
+              </button>
+              <button
+                className="rcb-btn"
+                onClick={() => {
+                  setPlan(null);
+                  setPhase("input");
+                }}
+                style={{
+                  padding: "15px 24px",
+                  borderRadius: 14,
+                  fontSize: 15,
+                  fontWeight: 600,
+                  background: "#FFFDF8",
+                  color: "#5C5345",
+                  boxShadow: "inset 0 0 0 1.5px #D8CBB2",
+                }}
+              >
+                Back
+              </button>
+            </div>
           </div>
         )}
 
         {/* ----------------------------- EXPLAIN ----------------------------- */}
         {phase === "explain" && (
           <div style={{ animation: "rcb-fadeup .45s both" }}>
+            {planActive && stack.length === 0 && <LessonProgress />}
             <Breadcrumb />
             <div
               style={{
@@ -1245,6 +1593,7 @@ export default function RecallCircles() {
         {/* ----------------------------- QUESTION (timed) ----------------------------- */}
         {phase === "question" && (
           <div style={{ animation: "rcb-fadeup .4s both" }}>
+            {planActive && stack.length === 0 && <LessonProgress />}
             <Breadcrumb />
             <div
               style={{
@@ -1335,6 +1684,7 @@ export default function RecallCircles() {
         {/* ----------------------------- RESPOND ----------------------------- */}
         {phase === "respond" && result && (
           <div style={{ animation: "rcb-fadeup .4s both" }}>
+            {planActive && stack.length === 0 && <LessonProgress />}
             <Breadcrumb />
             <span
               style={{
@@ -1418,9 +1768,14 @@ export default function RecallCircles() {
 
             {(() => {
               const inSub = stack.length > 0;
+              const inPlan = planActive && !inSub; // a plan step (not a dig-in)
               const correct = !graderError && result.verdict === "nailed it";
-              const canBranch = correct && !inSub && !!result.nextBranch.trim();
+              const canBranch =
+                correct && !inSub && !inPlan && !!result.nextBranch.trim();
               const canReturn = correct && inSub;
+              const lastQ = !!plan && planIndex >= plan.questions.length - 1;
+              const showNextQ = correct && inPlan && !lastQ;
+              const showFinish = correct && inPlan && lastQ;
               const notQuite = !graderError && result.verdict === "not quite";
               const onTrack = !graderError && result.verdict === "on the right track";
               const imperfect = notQuite || onTrack;
@@ -1490,6 +1845,48 @@ export default function RecallCircles() {
                     </p>
                   )}
 
+                  {showNextQ && (
+                    <p style={{ marginTop: 20, color: "#7A6F5E", fontSize: 15, lineHeight: 1.5 }}>
+                      Got it — on to question {planIndex + 2} of {plan!.questions.length}.
+                    </p>
+                  )}
+
+                  {showFinish && (
+                    <div
+                      style={{
+                        marginTop: 22,
+                        background: "#EDF5E6",
+                        border: "1px solid #A9CC8E",
+                        borderRadius: 16,
+                        padding: "18px 22px",
+                      }}
+                    >
+                      <p
+                        style={{
+                          fontSize: 12,
+                          fontWeight: 700,
+                          color: "#6A994E",
+                          textTransform: "uppercase",
+                          letterSpacing: ".08em",
+                          margin: "0 0 8px",
+                        }}
+                      >
+                        🎉 Lesson complete
+                      </p>
+                      <p
+                        style={{
+                          fontFamily: "'Fraunces', serif",
+                          fontSize: 20,
+                          lineHeight: 1.4,
+                          color: "#2B241B",
+                          margin: 0,
+                        }}
+                      >
+                        You worked through every question on {plan!.title}.
+                      </p>
+                    </div>
+                  )}
+
                   {imperfect && (
                     <p style={{ marginTop: 20, color: "#7A6F5E", fontSize: 15, lineHeight: 1.5 }}>
                       {notQuite
@@ -1501,7 +1898,15 @@ export default function RecallCircles() {
                   <div
                     style={{ display: "flex", gap: 12, marginTop: 22, flexWrap: "wrap" }}
                   >
-                    {canBranch ? (
+                    {showNextQ ? (
+                      <button className="rcb-btn" onClick={nextPlanQuestion} style={primaryStyle}>
+                        Next question ({planIndex + 2} of {plan!.questions.length}) →
+                      </button>
+                    ) : showFinish ? (
+                      <button className="rcb-btn" onClick={startReflect} style={primaryStyle}>
+                        Finish lesson →
+                      </button>
+                    ) : canBranch ? (
                       <button className="rcb-btn" onClick={continueBranch} style={primaryStyle}>
                         Continue → {result.nextBranch}
                       </button>
@@ -1564,9 +1969,11 @@ export default function RecallCircles() {
                       </>
                     )}
 
-                    <button className="rcb-btn" onClick={startReflect} style={subtleStyle}>
-                      Wrap up
-                    </button>
+                    {!showFinish && (
+                      <button className="rcb-btn" onClick={startReflect} style={subtleStyle}>
+                        Wrap up
+                      </button>
+                    )}
                   </div>
 
                   {askingSub && imperfect && (

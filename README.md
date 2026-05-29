@@ -19,6 +19,20 @@ A breadcrumb shows the chain of topics you've branched through this session, and
 the explanation and feedback can be **read aloud** by a neural voice running
 locally on your GPU (see *Voice playback* below).
 
+## Two modes: Explore and Lesson plan
+
+The input screen has a mode toggle:
+
+- **Explore** (above): open-ended. Each correct answer branches to an adjacent
+  topic you choose to continue into.
+- **Lesson plan**: pick a topic and a number of questions (3–8, default 6).
+  Claude designs an ordered set of classic questions (what / why / how /
+  what-if / …) that build understanding. Review and prune them, then **Start
+  lesson**: each question is taught with its own explanation, then asked; get it
+  right and you advance to the next. Finish them all and you've covered the
+  topic. The same re-explain, sub-question, doubling-retry, and voice mechanics
+  apply within a lesson; a progress bar shows where you are.
+
 ## Bring your own key (BYOK)
 
 This app has **no backend, no database, and no server route that ever sees a
