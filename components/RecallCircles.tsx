@@ -1,28 +1,23 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { AnimatePresence, motion } from "motion/react";
 import {
   ANSWER_SECONDS,
   COLORS,
-  HINT_BUDGET,
-  LEVELS,
   READ_SECONDS,
+  TECH_DEFAULT,
+  TECH_MAX,
+  TECH_MIN,
   colorOf,
+  technicalityLabel,
 } from "@/lib/constants";
-import { firstWords, fmt, shuffle } from "@/lib/utils";
-import type {
-  Grade,
-  Level,
-  Phase,
-  Piece,
-  QueueItem,
-} from "@/lib/types";
+import { fmt } from "@/lib/utils";
+import type { Phase, QueueItem, Response } from "@/lib/types";
 import {
   errorMessage,
-  generatePassage,
-  gradeAnswer,
+  generateExplanation,
   isAuthError,
+  respondToAnswer,
   splitThoughts,
 } from "@/lib/anthropic";
 import {
@@ -40,39 +35,24 @@ import SettingsModal from "./SettingsModal";
 const verdictColor = (v: string) =>
   v === "nailed it" ? "#6A994E" : v === "not quite" ? "#D85A47" : "#C7892B";
 
-/** Compact seconds label: "30s" under a minute, "1:00" at/above. */
-const labelSecs = (s: number) => (s >= 60 ? fmt(s) : `${s}s`);
-
 export default function RecallCircles() {
   const [phase, setPhase] = useState<Phase>("input");
   const [topic, setTopic] = useState("");
-  const [level, setLevel] = useState<Level>("standard");
+  const [tech, setTech] = useState(TECH_DEFAULT);
 
   const [title, setTitle] = useState("");
-  const [chunks, setChunks] = useState<string[]>([]);
+  const [explanation, setExplanation] = useState("");
   const [question, setQuestion] = useState("");
   const [keyPoints, setKeyPoints] = useState<string[]>([]);
-
-  const [pool, setPool] = useState<Piece[]>([]);
-  const [answer, setAnswer] = useState<number[]>([]);
-  const [graded, setGraded] = useState<boolean[] | null>(null);
-  const [hintedSlots, setHintedSlots] = useState<Record<number, string>>({});
-  const [hintsUsed, setHintsUsed] = useState(0);
-  const [showOriginal, setShowOriginal] = useState(false);
+  // Breadcrumb of titles covered this session, so branches read as a chain.
+  const [trail, setTrail] = useState<string[]>([]);
 
   const [response, setResponse] = useState("");
   const [timeLeft, setTimeLeft] = useState(ANSWER_SECONDS);
   const [readLeft, setReadLeft] = useState(READ_SECONDS);
-  const [feedback, setFeedback] = useState<Grade | null>(null);
-  const [error, setError] = useState("");
-
-  // Answer rounds: the question repeats until "nailed it", doubling the clock
-  // each time (30s → 60s → 2:00 → …). `roundSeconds` is the current round's
-  // total (timer denominator); `graderError` lets us avoid trapping the user
-  // in a retry loop when the grader couldn't be reached.
-  const [attempt, setAttempt] = useState(1);
-  const [roundSeconds, setRoundSeconds] = useState(ANSWER_SECONDS);
+  const [result, setResult] = useState<Response | null>(null);
   const [graderError, setGraderError] = useState(false);
+  const [error, setError] = useState("");
 
   // BYOK key state.
   const [apiKey, setApiKey] = useState("");
@@ -106,9 +86,6 @@ export default function RecallCircles() {
     setQueue(loadQueue());
   }, []);
 
-  const N = chunks.length;
-  const textOf = (id: number) => chunks[id];
-
   /* ----------------------------- key actions ----------------------------- */
   function handleSaveKey(key: string, rememberIt: boolean) {
     setApiKey(key);
@@ -132,9 +109,13 @@ export default function RecallCircles() {
     clearKey();
   }
 
-  /* ------------------ generate passage + question + key points ------------- */
-  async function generate() {
-    const t = topic.trim();
+  /* ------------------------ explain (generate lesson) --------------------- */
+  async function runGenerate(
+    targetTopic: string,
+    fromTopic: string | null,
+    resetTrail: boolean
+  ) {
+    const t = targetTopic.trim();
     if (!t) return;
     if (!apiKey.trim()) {
       setError("Add your Anthropic key to begin.");
@@ -144,18 +125,19 @@ export default function RecallCircles() {
     setPhase("loading");
     setError("");
     try {
-      const p = await generatePassage(apiKey, t, level);
-      setTitle(p.title);
-      setChunks(p.chunks);
-      setQuestion(p.question);
-      setKeyPoints(p.keyPoints);
-      setShowOriginal(false);
+      const lesson = await generateExplanation(apiKey, t, tech, fromTopic);
+      setTitle(lesson.title);
+      setExplanation(lesson.explanation);
+      setQuestion(lesson.question);
+      setKeyPoints(lesson.keyPoints);
+      setResult(null);
+      setTrail((prev) => (resetTrail ? [lesson.title] : [...prev, lesson.title]));
       // A queued curiosity has now become a round — retire it.
       if (pendingQueueId) {
         removeFromQueue(pendingQueueId);
         setPendingQueueId(null);
       }
-      setPhase("read");
+      setPhase("explain");
     } catch (e) {
       setError(errorMessage(e));
       if (isAuthError(e)) {
@@ -166,74 +148,31 @@ export default function RecallCircles() {
     }
   }
 
-  /* ----------------------------- reconstruction ---------------------------- */
-  function startBuild() {
-    setPool(shuffle(chunks.map((_, i) => ({ id: i, revealed: false }))));
-    setAnswer([]);
-    setGraded(null);
-    setHintedSlots({});
-    setHintsUsed(0);
-    setShowOriginal(false);
-    setPhase("build");
+  function generateFromInput() {
+    runGenerate(topic, null, true);
   }
 
-  function tapCircle(id: number) {
-    const item = pool.find((p) => p.id === id);
-    if (!item) return;
-    if (!item.revealed) {
-      setPool((p) => p.map((x) => (x.id === id ? { ...x, revealed: true } : x)));
-    } else {
-      setPool((p) => p.filter((x) => x.id !== id));
-      setAnswer((a) => [...a, id]);
-    }
-  }
-
-  function removeFromAnswer(id: number) {
-    if (graded) return;
-    setAnswer((a) => a.filter((x) => x !== id));
-    setPool((p) => [...p, { id, revealed: true }]);
-  }
-
-  function useHint() {
-    const slot = answer.length;
-    if (hintsUsed >= HINT_BUDGET || slot >= N || hintedSlots[slot]) return;
-    setHintedSlots((h) => ({ ...h, [slot]: firstWords(chunks[slot]) }));
-    setHintsUsed((c) => c + 1);
-  }
-
-  function check() {
-    setGraded(answer.map((id, idx) => id === idx));
-    setPhase("result");
+  function continueBranch() {
+    const nb = result?.nextBranch?.trim();
+    if (!nb) return;
+    setTopic(nb);
+    runGenerate(nb, title, false);
   }
 
   /* ----------------------------- timed question ---------------------------- */
+  // Used both for the first question after the explanation and for "give it
+  // another go" — both reset to a fresh ANSWER_SECONDS clock.
   function startQuestion() {
-    setAttempt(1);
-    setRoundSeconds(ANSWER_SECONDS);
+    setResponse("");
+    setResult(null);
+    submittedRef.current = false;
     setTimeLeft(ANSWER_SECONDS);
-    setResponse("");
-    setFeedback(null);
-    submittedRef.current = false;
     setPhase("question");
   }
 
-  // Another go at the same question after a not-quite answer. Each round
-  // doubles the clock: round 1 = 30s, round 2 = 60s, round 3 = 2:00, …
-  function retryQuestion() {
-    const nextAttempt = attempt + 1;
-    const secs = ANSWER_SECONDS * 2 ** (nextAttempt - 1);
-    setAttempt(nextAttempt);
-    setRoundSeconds(secs);
-    setTimeLeft(secs);
-    setResponse("");
-    setFeedback(null);
-    submittedRef.current = false;
-    setPhase("question");
-  }
-
-  // READ countdown — auto-advances to build at 0.
+  // READ countdown — auto-advances to the question at 0.
   useEffect(() => {
-    if (phase !== "read") return;
+    if (phase !== "explain") return;
     readSettledRef.current = false;
     setReadLeft(READ_SECONDS);
     const iv = setInterval(() => {
@@ -242,7 +181,7 @@ export default function RecallCircles() {
           clearInterval(iv);
           if (!readSettledRef.current) {
             readSettledRef.current = true;
-            startBuild();
+            startQuestion();
           }
           return 0;
         }
@@ -276,30 +215,30 @@ export default function RecallCircles() {
     setPhase("grading");
     setGraderError(false);
     try {
-      const g = await gradeAnswer(apiKey, {
-        chunks,
+      const r = await respondToAnswer(apiKey, {
+        explanation,
         question,
         keyPoints,
         answer: text || "",
       });
-      setFeedback(g);
+      setResult(r);
     } catch (e) {
       if (isAuthError(e)) {
         setAuthError("That key was rejected — check it and try again.");
         setShowSettings(true);
       }
-      // Couldn't verify correctness — don't trap the user in retries.
+      // Couldn't verify — don't trap the user; let them retry or wrap up.
       setGraderError(true);
-      setFeedback({
+      setResult({
         verdict: "on the right track",
         feedback:
           "Couldn't reach the grader just now — the key idea: " +
           (keyPoints.join("; ") || title) +
           ".",
-        modelAnswer: keyPoints.join(" ") || title,
+        nextBranch: "",
       });
     }
-    setPhase("feedback");
+    setPhase("respond");
   }
 
   /* ------------------------------- reflect ------------------------------- */
@@ -315,6 +254,8 @@ export default function RecallCircles() {
     setTidied(null);
     setTidying(false);
     setTopic("");
+    setTrail([]);
+    setResult(null);
     setPendingQueueId(null);
     setError("");
     setPhase("input");
@@ -327,7 +268,6 @@ export default function RecallCircles() {
       return;
     }
     if (!apiKey.trim()) {
-      // No key to tidy with — keep the raw lines so nothing is lost.
       setTidied(dump.split(/\n+/).map((s) => s.trim()).filter(Boolean));
       return;
     }
@@ -336,7 +276,6 @@ export default function RecallCircles() {
       const qs = await splitThoughts(apiKey, dump, title || topic);
       setTidied(qs);
     } catch {
-      // Fall back to the raw lines rather than dropping the user's notes.
       setTidied(dump.split(/\n+/).map((s) => s.trim()).filter(Boolean));
     }
     setTidying(false);
@@ -381,12 +320,32 @@ export default function RecallCircles() {
     setError("");
   }
 
-  const correctCount = graded ? graded.filter(Boolean).length : 0;
   const maskedHeaderKey = savedKey
     ? maskKey(savedKey)
     : apiKey
       ? "this session"
       : null;
+
+  const Breadcrumb = () =>
+    trail.length > 0 ? (
+      <p
+        style={{
+          fontSize: 13,
+          color: "#9A8F7C",
+          margin: "0 0 14px",
+          fontWeight: 600,
+        }}
+      >
+        {trail.map((t, i) => (
+          <span key={i}>
+            {i > 0 && <span style={{ opacity: 0.5 }}> › </span>}
+            <span style={{ color: i === trail.length - 1 ? "#5C5345" : "#9A8F7C" }}>
+              {t}
+            </span>
+          </span>
+        ))}
+      </p>
+    ) : null;
 
   /* ------------------------------- shell -------------------------------- */
   return (
@@ -467,7 +426,7 @@ export default function RecallCircles() {
           </button>
         </div>
         <p style={{ margin: "0 0 28px", color: "#7A6F5E", fontSize: 15 }}>
-          Read once. Rebuild from memory. Then explain it back.
+          Pick a topic. Read the explanation. Answer back. Branch onward.
         </p>
 
         {/* ----------------------------- INPUT ----------------------------- */}
@@ -488,10 +447,9 @@ export default function RecallCircles() {
               value={topic}
               onChange={(e) => {
                 setTopic(e.target.value);
-                // Editing breaks the link to a tapped queue chip.
                 if (pendingQueueId) setPendingQueueId(null);
               }}
-              onKeyDown={(e) => e.key === "Enter" && generate()}
+              onKeyDown={(e) => e.key === "Enter" && generateFromInput()}
               placeholder="e.g. how a black hole forms, the French Revolution, photosynthesis…"
               style={{
                 width: "100%",
@@ -506,42 +464,62 @@ export default function RecallCircles() {
                 color: "#211B14",
               }}
             />
-            <div style={{ display: "flex", gap: 10, marginTop: 18, flexWrap: "wrap" }}>
-              {(Object.entries(LEVELS) as [Level, (typeof LEVELS)[Level]][]).map(
-                ([key, v]) => {
-                  const on = level === key;
-                  return (
-                    <button
-                      key={key}
-                      className="rcb-btn"
-                      onClick={() => setLevel(key)}
-                      style={{
-                        padding: "10px 18px",
-                        borderRadius: 999,
-                        fontSize: 14,
-                        fontWeight: 600,
-                        background: on ? "#211B14" : "#FFFDF8",
-                        color: on ? "#F7F1E5" : "#5C5345",
-                        boxShadow: on
-                          ? "0 4px 14px rgba(33,27,20,.22)"
-                          : "inset 0 0 0 1.5px #D8CBB2",
-                      }}
-                    >
-                      {v.label}
-                      <span style={{ opacity: 0.6, marginLeft: 8, fontWeight: 500 }}>
-                        {v.n} pieces
-                      </span>
-                    </button>
-                  );
-                }
-              )}
+
+            {/* technicality slider */}
+            <div style={{ marginTop: 24 }}>
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "baseline",
+                  justifyContent: "space-between",
+                  marginBottom: 10,
+                }}
+              >
+                <label
+                  style={{
+                    fontSize: 13,
+                    fontWeight: 600,
+                    color: "#5C5345",
+                    textTransform: "uppercase",
+                    letterSpacing: ".08em",
+                  }}
+                >
+                  How technical?
+                </label>
+                <span style={{ fontSize: 14, color: "#5C5345", fontWeight: 600 }}>
+                  {technicalityLabel(tech)}{" "}
+                  <span style={{ opacity: 0.6 }}>· {tech}/10</span>
+                </span>
+              </div>
+              <input
+                type="range"
+                min={TECH_MIN}
+                max={TECH_MAX}
+                step={1}
+                value={tech}
+                onChange={(e) => setTech(Number(e.target.value))}
+                style={{ width: "100%", accentColor: "#E4572E", cursor: "pointer" }}
+              />
+              <div
+                style={{
+                  display: "flex",
+                  justifyContent: "space-between",
+                  marginTop: 4,
+                  fontSize: 12,
+                  color: "#9A8F7C",
+                }}
+              >
+                <span>Plain &amp; everyday</span>
+                <span>Research-level</span>
+              </div>
             </div>
+
             {error && (
-              <p style={{ color: "#C0392B", fontSize: 14, marginTop: 16 }}>{error}</p>
+              <p style={{ color: "#C0392B", fontSize: 14, marginTop: 18 }}>{error}</p>
             )}
             <button
               className="rcb-btn"
-              onClick={generate}
+              onClick={generateFromInput}
               disabled={!topic.trim()}
               style={{
                 marginTop: 26,
@@ -554,7 +532,7 @@ export default function RecallCircles() {
                 boxShadow: "0 8px 22px rgba(228,87,46,.35)",
               }}
             >
-              Generate passage →
+              Explain it →
             </button>
 
             {/* look-into-next queue */}
@@ -671,14 +649,15 @@ export default function RecallCircles() {
               ))}
             </div>
             <p style={{ fontFamily: "'Fraunces', serif", fontSize: 20, color: "#5C5345" }}>
-              {phase === "loading" ? "Writing your passage…" : "Reading your answer…"}
+              {phase === "loading" ? "Writing your explanation…" : "Reading your answer…"}
             </p>
           </div>
         )}
 
-        {/* ----------------------------- READ ----------------------------- */}
-        {phase === "read" && (
+        {/* ----------------------------- EXPLAIN ----------------------------- */}
+        {phase === "explain" && (
           <div style={{ animation: "rcb-fadeup .45s both" }}>
+            <Breadcrumb />
             <div
               style={{
                 display: "flex",
@@ -697,7 +676,7 @@ export default function RecallCircles() {
                   margin: 0,
                 }}
               >
-                Learn it — scrambles when time&apos;s up
+                Learn it — you&apos;ll be quizzed when time&apos;s up
               </p>
               <span
                 style={{
@@ -752,7 +731,7 @@ export default function RecallCircles() {
                 boxShadow: "0 14px 40px -22px rgba(80,60,30,.35)",
               }}
             >
-              {chunks.join(" ")}
+              {explanation}
             </div>
             <div
               style={{
@@ -768,7 +747,7 @@ export default function RecallCircles() {
                 onClick={() => {
                   if (!readSettledRef.current) {
                     readSettledRef.current = true;
-                    startBuild();
+                    startQuestion();
                   }
                 }}
                 style={{
@@ -781,7 +760,7 @@ export default function RecallCircles() {
                   boxShadow: "0 8px 22px rgba(33,27,20,.3)",
                 }}
               >
-                I&apos;m ready — scramble it ↯
+                I&apos;m ready — quiz me →
               </button>
               <span style={{ fontSize: 14, color: "#9A8F7C" }}>
                 Tap when you&apos;ve got it, or let the clock decide.
@@ -790,353 +769,10 @@ export default function RecallCircles() {
           </div>
         )}
 
-        {/* ----------------------------- BUILD / RESULT ----------------------------- */}
-        {(phase === "build" || phase === "result") && (
-          <div style={{ animation: "rcb-fadeup .4s both" }}>
-            {pool.length > 0 && (
-              <>
-                <p
-                  style={{
-                    fontSize: 13,
-                    fontWeight: 600,
-                    color: "#9A8F7C",
-                    textTransform: "uppercase",
-                    letterSpacing: ".1em",
-                    margin: "0 0 12px",
-                  }}
-                >
-                  The pieces — tap to reveal, tap again to place
-                </p>
-                <div
-                  style={{
-                    display: "flex",
-                    flexWrap: "wrap",
-                    gap: 14,
-                    marginBottom: 30,
-                  }}
-                >
-                  <AnimatePresence mode="popLayout">
-                    {pool.map((p) =>
-                      p.revealed ? (
-                        <motion.div
-                          key={p.id}
-                          layout
-                          layoutId={`piece-${p.id}`}
-                          initial={{ opacity: 0, scale: 0.85 }}
-                          animate={{ opacity: 1, scale: 1 }}
-                          exit={{ opacity: 0, scale: 0.85 }}
-                          transition={{ type: "spring", stiffness: 500, damping: 38 }}
-                          className="rcb-pill"
-                          onClick={() => tapCircle(p.id)}
-                          style={{
-                            flex: "1 1 240px",
-                            maxWidth: "100%",
-                            fontFamily: "'Newsreader', serif",
-                            fontSize: 16,
-                            lineHeight: 1.4,
-                            padding: "14px 16px 14px 18px",
-                            borderRadius: 14,
-                            background: "#FFFDF8",
-                            borderLeft: `6px solid ${colorOf(p.id)}`,
-                            boxShadow: "0 6px 18px -10px rgba(80,60,30,.4)",
-                          }}
-                        >
-                          {textOf(p.id)}
-                          <span
-                            style={{
-                              display: "block",
-                              marginTop: 6,
-                              fontFamily: "'Hanken Grotesk',sans-serif",
-                              fontSize: 12,
-                              fontWeight: 600,
-                              color: colorOf(p.id),
-                            }}
-                          >
-                            tap to place ↓
-                          </span>
-                        </motion.div>
-                      ) : (
-                        <motion.div
-                          key={p.id}
-                          layout
-                          layoutId={`piece-${p.id}`}
-                          initial={{ opacity: 0, y: 14 }}
-                          animate={{ opacity: 1, y: 0 }}
-                          exit={{ opacity: 0, scale: 0.8 }}
-                          transition={{ type: "spring", stiffness: 420, damping: 30 }}
-                          className="rcb-dot"
-                          onClick={() => tapCircle(p.id)}
-                          style={{
-                            width: 66,
-                            height: 66,
-                            borderRadius: "50%",
-                            background: colorOf(p.id),
-                            boxShadow: `0 8px 18px -6px ${colorOf(p.id)}`,
-                          }}
-                        />
-                      )
-                    )}
-                  </AnimatePresence>
-                </div>
-              </>
-            )}
-
-            <p
-              style={{
-                fontSize: 13,
-                fontWeight: 600,
-                color: "#9A8F7C",
-                textTransform: "uppercase",
-                letterSpacing: ".1em",
-                margin: "0 0 12px",
-              }}
-            >
-              Your paragraph
-            </p>
-            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-              {Array.from({ length: N }).map((_, slot) => {
-                const id = answer[slot];
-                const filled = id !== undefined;
-                const ok = graded ? graded[slot] : null;
-                const hint = hintedSlots[slot];
-                return (
-                  <motion.div
-                    key={slot}
-                    layout
-                    transition={{ type: "spring", stiffness: 500, damping: 40 }}
-                    onClick={() => filled && removeFromAnswer(id)}
-                    style={{
-                      display: "flex",
-                      alignItems: "flex-start",
-                      gap: 14,
-                      padding: "14px 16px",
-                      borderRadius: 14,
-                      minHeight: 56,
-                      cursor: filled && !graded ? "pointer" : "default",
-                      background: filled ? "#FFFDF8" : "transparent",
-                      border: filled
-                        ? `1.5px solid ${
-                            ok === null ? "#E4D8C0" : ok ? "#6A994E" : "#D85A47"
-                          }`
-                        : "1.5px dashed #D2C4A8",
-                    }}
-                  >
-                    <span
-                      style={{
-                        flexShrink: 0,
-                        width: 26,
-                        height: 26,
-                        borderRadius: "50%",
-                        background: filled ? colorOf(id) : "#E7DCC6",
-                        color: "#fff",
-                        fontSize: 13,
-                        fontWeight: 700,
-                        display: "flex",
-                        alignItems: "center",
-                        justifyContent: "center",
-                      }}
-                    >
-                      {slot + 1}
-                    </span>
-                    {filled ? (
-                      <motion.span
-                        layoutId={`piece-${id}`}
-                        style={{
-                          fontFamily: "'Newsreader', serif",
-                          fontSize: 17,
-                          lineHeight: 1.4,
-                          color: "#2B241B",
-                          paddingTop: 1,
-                        }}
-                      >
-                        {textOf(id)}
-                        {graded && ok === false && (
-                          <span
-                            style={{
-                              display: "block",
-                              marginTop: 4,
-                              fontFamily: "'Hanken Grotesk',sans-serif",
-                              fontSize: 12,
-                              fontWeight: 700,
-                              color: "#D85A47",
-                            }}
-                          >
-                            out of place
-                          </span>
-                        )}
-                      </motion.span>
-                    ) : (
-                      <span
-                        style={{
-                          fontFamily: "'Newsreader', serif",
-                          fontSize: 17,
-                          lineHeight: 1.4,
-                          color: "#B6A98E",
-                          paddingTop: 1,
-                        }}
-                      >
-                        {hint ? (
-                          <span style={{ fontStyle: "italic" }}>
-                            starts with “{hint}”
-                          </span>
-                        ) : (
-                          "empty"
-                        )}
-                      </span>
-                    )}
-                  </motion.div>
-                );
-              })}
-            </div>
-
-            {phase === "build" && (
-              <div
-                style={{
-                  display: "flex",
-                  gap: 12,
-                  marginTop: 24,
-                  flexWrap: "wrap",
-                  alignItems: "center",
-                }}
-              >
-                <button
-                  className="rcb-btn"
-                  onClick={check}
-                  disabled={answer.length !== N}
-                  style={{
-                    padding: "15px 30px",
-                    borderRadius: 14,
-                    fontSize: 16,
-                    fontWeight: 700,
-                    background: "#E4572E",
-                    color: "#fff",
-                    boxShadow: "0 8px 22px rgba(228,87,46,.35)",
-                  }}
-                >
-                  Check my order
-                </button>
-                <button
-                  className="rcb-btn"
-                  onClick={useHint}
-                  disabled={hintsUsed >= HINT_BUDGET || answer.length >= N}
-                  style={{
-                    padding: "13px 22px",
-                    borderRadius: 14,
-                    fontSize: 14,
-                    fontWeight: 600,
-                    background: "#FFFDF8",
-                    color: "#5C5345",
-                    boxShadow: "inset 0 0 0 1.5px #D8CBB2",
-                  }}
-                >
-                  💡 Hint <span style={{ opacity: 0.6 }}>({HINT_BUDGET - hintsUsed} left)</span>
-                </button>
-              </div>
-            )}
-
-            {phase === "result" && (
-              <div style={{ marginTop: 26, animation: "rcb-fadeup .4s both" }}>
-                <div
-                  style={{
-                    padding: "20px 24px",
-                    borderRadius: 18,
-                    background: correctCount === N ? "#EDF5E6" : "#FBF1E8",
-                    border: `1.5px solid ${correctCount === N ? "#A9CC8E" : "#EBC9A8"}`,
-                  }}
-                >
-                  <p
-                    style={{
-                      fontFamily: "'Fraunces', serif",
-                      fontWeight: 600,
-                      fontSize: 22,
-                      margin: 0,
-                    }}
-                  >
-                    {correctCount === N
-                      ? "Rebuilt exactly."
-                      : `${correctCount} of ${N} in the right place.`}
-                  </p>
-                  <p style={{ margin: "6px 0 0", color: "#7A6F5E", fontSize: 14 }}>
-                    {correctCount === N
-                      ? hintsUsed === 0
-                        ? "From memory, no hints — that's the whole thing back."
-                        : `Nicely done — with ${hintsUsed} hint${hintsUsed > 1 ? "s" : ""}.`
-                      : "Red slots drifted. Now put the idea in your own words ↓"}
-                  </p>
-                </div>
-                <button
-                  className="rcb-btn"
-                  onClick={startQuestion}
-                  style={{
-                    marginTop: 18,
-                    padding: "15px 30px",
-                    borderRadius: 14,
-                    fontSize: 16,
-                    fontWeight: 700,
-                    background: "#211B14",
-                    color: "#F7F1E5",
-                    boxShadow: "0 8px 22px rgba(33,27,20,.3)",
-                  }}
-                >
-                  Next: one question →
-                </button>
-                <div style={{ display: "flex", gap: 12, marginTop: 14, flexWrap: "wrap" }}>
-                  <button
-                    className="rcb-btn"
-                    onClick={() => setShowOriginal((s) => !s)}
-                    style={{
-                      padding: "11px 18px",
-                      borderRadius: 12,
-                      fontSize: 14,
-                      fontWeight: 600,
-                      background: "#FFFDF8",
-                      color: "#5C5345",
-                      boxShadow: "inset 0 0 0 1.5px #D8CBB2",
-                    }}
-                  >
-                    {showOriginal ? "Hide original" : "See the original"}
-                  </button>
-                  <button
-                    className="rcb-btn"
-                    onClick={startBuild}
-                    style={{
-                      padding: "11px 18px",
-                      borderRadius: 12,
-                      fontSize: 14,
-                      fontWeight: 600,
-                      background: "#FFFDF8",
-                      color: "#5C5345",
-                      boxShadow: "inset 0 0 0 1.5px #D8CBB2",
-                    }}
-                  >
-                    Shuffle & retry
-                  </button>
-                </div>
-                {showOriginal && (
-                  <div
-                    style={{
-                      marginTop: 16,
-                      fontFamily: "'Newsreader', serif",
-                      fontSize: 18,
-                      lineHeight: 1.6,
-                      color: "#2B241B",
-                      background: "#FFFDF8",
-                      border: "1px solid #E4D8C0",
-                      borderRadius: 16,
-                      padding: "22px 24px",
-                    }}
-                  >
-                    {chunks.join(" ")}
-                  </div>
-                )}
-              </div>
-            )}
-          </div>
-        )}
-
         {/* ----------------------------- QUESTION (timed) ----------------------------- */}
         {phase === "question" && (
           <div style={{ animation: "rcb-fadeup .4s both" }}>
+            <Breadcrumb />
             <div
               style={{
                 display: "flex",
@@ -1155,7 +791,7 @@ export default function RecallCircles() {
                   margin: 0,
                 }}
               >
-                In your own words{attempt > 1 ? ` · round ${attempt}` : ""}
+                In your own words
               </p>
               <span
                 style={{
@@ -1166,7 +802,7 @@ export default function RecallCircles() {
                   animation: timeLeft <= 10 ? "rcb-pulse 1s infinite" : "none",
                 }}
               >
-                {labelSecs(timeLeft)}
+                {timeLeft}s
               </span>
             </div>
             <div
@@ -1181,7 +817,7 @@ export default function RecallCircles() {
               <div
                 style={{
                   height: "100%",
-                  width: `${(timeLeft / roundSeconds) * 100}%`,
+                  width: `${(timeLeft / ANSWER_SECONDS) * 100}%`,
                   background: timeLeft <= 10 ? "#D85A47" : "#E4572E",
                   transition: "width 1s linear",
                 }}
@@ -1223,9 +859,10 @@ export default function RecallCircles() {
           </div>
         )}
 
-        {/* ----------------------------- FEEDBACK ----------------------------- */}
-        {phase === "feedback" && feedback && (
+        {/* ----------------------------- RESPOND ----------------------------- */}
+        {phase === "respond" && result && (
           <div style={{ animation: "rcb-fadeup .4s both" }}>
+            <Breadcrumb />
             <span
               style={{
                 display: "inline-block",
@@ -1236,10 +873,10 @@ export default function RecallCircles() {
                 textTransform: "uppercase",
                 letterSpacing: ".06em",
                 color: "#fff",
-                background: verdictColor(feedback.verdict),
+                background: verdictColor(result.verdict),
               }}
             >
-              {feedback.verdict}
+              {result.verdict}
             </span>
             <p
               style={{
@@ -1250,7 +887,7 @@ export default function RecallCircles() {
                 margin: "16px 0 0",
               }}
             >
-              {feedback.feedback}
+              {result.feedback}
             </p>
 
             <div
@@ -1303,15 +940,11 @@ export default function RecallCircles() {
             </div>
 
             {(() => {
-              const nailed = feedback.verdict === "nailed it";
-              // Only a correct answer opens the road to "what next". If the
-              // grader was unreachable we can't verify, so we let them through
-              // rather than trap them in an unwinnable retry loop.
-              const canAdvance = nailed || graderError;
-              const nextRoundSecs = ANSWER_SECONDS * 2 ** attempt;
+              const correct = !graderError && result.verdict === "nailed it";
+              const canBranch = correct && !!result.nextBranch.trim();
               return (
                 <>
-                  {!canAdvance && (
+                  {canBranch && (
                     <div
                       style={{
                         marginTop: 22,
@@ -1331,22 +964,18 @@ export default function RecallCircles() {
                           margin: "0 0 8px",
                         }}
                       >
-                        A model answer
+                        Branch onward
                       </p>
                       <p
                         style={{
-                          fontFamily: "'Newsreader', serif",
-                          fontSize: 18,
-                          lineHeight: 1.55,
+                          fontFamily: "'Fraunces', serif",
+                          fontSize: 20,
+                          lineHeight: 1.4,
                           color: "#2B241B",
                           margin: 0,
                         }}
                       >
-                        {feedback.modelAnswer}
-                      </p>
-                      <p style={{ margin: "12px 0 0", fontSize: 14, color: "#5C5345" }}>
-                        Take it in, then put the idea back in your own words —
-                        you&apos;ll get {labelSecs(nextRoundSecs)} this round.
+                        {result.nextBranch}
                       </p>
                     </div>
                   )}
@@ -1354,10 +983,10 @@ export default function RecallCircles() {
                   <div
                     style={{ display: "flex", gap: 12, marginTop: 22, flexWrap: "wrap" }}
                   >
-                    {canAdvance ? (
+                    {canBranch ? (
                       <button
                         className="rcb-btn"
-                        onClick={startReflect}
+                        onClick={continueBranch}
                         style={{
                           padding: "14px 26px",
                           borderRadius: 14,
@@ -1368,12 +997,12 @@ export default function RecallCircles() {
                           boxShadow: "0 8px 22px rgba(228,87,46,.35)",
                         }}
                       >
-                        What next? →
+                        Continue → {result.nextBranch}
                       </button>
                     ) : (
                       <button
                         className="rcb-btn"
-                        onClick={retryQuestion}
+                        onClick={startQuestion}
                         style={{
                           padding: "14px 26px",
                           borderRadius: 14,
@@ -1384,12 +1013,12 @@ export default function RecallCircles() {
                           boxShadow: "0 8px 22px rgba(228,87,46,.35)",
                         }}
                       >
-                        Try again — {labelSecs(nextRoundSecs)} →
+                        Give it another go
                       </button>
                     )}
                     <button
                       className="rcb-btn"
-                      onClick={() => setPhase("read")}
+                      onClick={startReflect}
                       style={{
                         padding: "14px 22px",
                         borderRadius: 14,
@@ -1400,7 +1029,7 @@ export default function RecallCircles() {
                         boxShadow: "inset 0 0 0 1.5px #D8CBB2",
                       }}
                     >
-                      Replay this one
+                      Wrap up
                     </button>
                   </div>
                 </>

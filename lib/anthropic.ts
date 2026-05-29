@@ -1,5 +1,5 @@
-import type { Grade, Level, Passage, Verdict } from "./types";
-import { LEVELS } from "./constants";
+import type { Lesson, Response, Verdict } from "./types";
+import { technicalityPrompt } from "./constants";
 
 /*
  * BYOK Anthropic client.
@@ -50,7 +50,7 @@ interface MessagesResponse {
 
 /** Single round-trip to the Messages API; returns the concatenated text. */
 async function callClaude(apiKey: string, prompt: string): Promise<string> {
-  let res: Response;
+  let res: globalThis.Response;
   try {
     res = await fetch(API_URL, {
       method: "POST",
@@ -123,40 +123,48 @@ function parseJson<T>(raw: string): T {
 
 /* --------------------------- prompt builders --------------------------- */
 
-function buildGeneratePrompt(topic: string, level: Level): string {
-  const lv = LEVELS[level];
-  return `You create material for a study game: the player reads a passage, rebuilds it from memory, then answers one question about it.
+function buildExplainPrompt(
+  topic: string,
+  tech: number,
+  fromTopic: string | null
+): string {
+  return `You are the engine of a study loop: the learner picks a topic, you explain it, then you pose one question that tests whether they grasped the core idea.
 
 Topic: "${topic}"
+${
+  fromTopic
+    ? `This is a branch that follows on from "${fromTopic}" — connect to it in a sentence, but make the explanation stand on its own.`
+    : ""
+}
+Write at technicality level ${tech} out of 10. ${technicalityPrompt(tech)}
 
-1. Write a coherent passage of EXACTLY ${lv.n} sentences at this level: ${lv.desc}.
-   - Order must carry meaning (chronological, causal, or building logic).
-   - Each sentence must stand alone when shown by itself — avoid opening pronouns like "this/it/they" that only make sense beside the previous sentence.
-2. Write ONE open-ended question testing whether the reader grasped the CENTRAL idea — a "why", "explain", or "what would happen if" question, never a lookup of an exact figure or name.
+1. Explain the topic in 4-6 clear sentences at that level. The explanation must stand alone and build logically.
+2. Pose ONE open-ended question testing whether the reader grasped the CENTRAL idea — a "why", "explain", or "what would happen if" question, never a lookup of an exact figure or name.
 3. List 1-3 short key points a correct answer must convey.
 
 Respond with ONLY valid JSON, no preamble and no code fences:
-{"title":"2-4 word title","chunks":["sentence 1",...],"question":"...","keyPoints":["...",...]}
-chunks must have EXACTLY ${lv.n} items in correct reading order.`;
+{"title":"2-4 word title","explanation":"...","question":"...","keyPoints":["...",...]}`;
 }
 
-function buildGradePrompt(p: {
-  chunks: string[];
+function buildRespondPrompt(p: {
+  explanation: string;
   question: string;
   keyPoints: string[];
   answer: string;
 }): string {
-  return `You are grading a learner's free-text answer to a comprehension question. Be warm and encouraging. Focus ONLY on whether the core idea is conveyed — ignore grammar, spelling, phrasing, and missing minor detail.
+  return `You are grading a learner's free-text answer in a study loop, and steering where they go next. Be warm and encouraging. Focus ONLY on whether the core idea is conveyed — ignore grammar, spelling, and phrasing.
 
-Passage (reference): ${p.chunks.join(" ")}
+What they studied (reference): ${p.explanation}
 Question: ${p.question}
-Key ideas a correct answer must convey: ${p.keyPoints.join(" | ") || "(use your judgement from the passage)"}
+Key ideas a correct answer must convey: ${p.keyPoints.join(" | ") || "(use your judgement)"}
 Learner's answer: """${p.answer.trim() || "(left blank)"}"""
 
-If the answer is blank, gently state the key idea they were reaching for.
-Also write a model answer: a concise, plain-language ideal response to the question (1-2 sentences) that fully conveys the core idea — the kind of answer that would earn "nailed it".
+1. Judge whether they got the core idea (be lenient on wording).
+2. Write 2-3 warm sentences of feedback: what they got, and the core idea if they missed it. If the answer is blank, gently state the idea they were reaching for.
+3. Propose nextBranch: a short topic (2-6 words) naming a natural next thing to explore that branches slightly outward from this one — the curiosity this answer should open up.
+
 Respond with ONLY valid JSON, no fences:
-{"verdict":"nailed it" | "on the right track" | "not quite","feedback":"2-3 warm sentences: what they got, and the core idea if they missed it","modelAnswer":"1-2 sentence ideal answer to the question"}`;
+{"verdict":"nailed it" | "on the right track" | "not quite","feedback":"...","nextBranch":"short topic"}`;
 }
 
 function buildSplitPrompt(dump: string, sourceTopic: string): string {
@@ -180,18 +188,15 @@ If the dump is empty or yields nothing usable, return {"questions":[]}.`;
 
 /* ------------------------------ API calls ------------------------------ */
 
-export async function generatePassage(
+export async function generateExplanation(
   apiKey: string,
   topic: string,
-  level: Level
-): Promise<Passage> {
-  const raw = await callClaude(apiKey, buildGeneratePrompt(topic, level));
-  const parsed = parseJson<Partial<Passage>>(raw);
-  if (
-    !parsed.chunks ||
-    !Array.isArray(parsed.chunks) ||
-    parsed.chunks.length < 3
-  ) {
+  tech: number,
+  fromTopic: string | null = null
+): Promise<Lesson> {
+  const raw = await callClaude(apiKey, buildExplainPrompt(topic, tech, fromTopic));
+  const parsed = parseJson<Partial<Lesson>>(raw);
+  if (!parsed.explanation || typeof parsed.explanation !== "string") {
     throw new AnthropicError(
       "parse",
       "That one didn't come through cleanly — give it another go, or tweak the topic."
@@ -199,7 +204,7 @@ export async function generatePassage(
   }
   return {
     title: String(parsed.title || topic).trim(),
-    chunks: parsed.chunks.map((s) => String(s).trim()),
+    explanation: String(parsed.explanation).trim(),
     question: String(parsed.question ?? "").trim(),
     keyPoints: Array.isArray(parsed.keyPoints)
       ? parsed.keyPoints.map((k) => String(k).trim()).filter(Boolean)
@@ -207,27 +212,25 @@ export async function generatePassage(
   };
 }
 
-export async function gradeAnswer(
+export async function respondToAnswer(
   apiKey: string,
   args: {
-    chunks: string[];
+    explanation: string;
     question: string;
     keyPoints: string[];
     answer: string;
   }
-): Promise<Grade> {
-  const raw = await callClaude(apiKey, buildGradePrompt(args));
-  const parsed = parseJson<Partial<Grade>>(raw);
+): Promise<Response> {
+  const raw = await callClaude(apiKey, buildRespondPrompt(args));
+  const parsed = parseJson<Partial<Response>>(raw);
   const allowed: Verdict[] = ["nailed it", "on the right track", "not quite"];
   const verdict: Verdict = allowed.includes(parsed.verdict as Verdict)
     ? (parsed.verdict as Verdict)
     : "on the right track";
-  const modelAnswer =
-    String(parsed.modelAnswer ?? "").trim() || args.keyPoints.join(" ");
   return {
     verdict,
     feedback: String(parsed.feedback ?? "").trim(),
-    modelAnswer,
+    nextBranch: String(parsed.nextBranch ?? "").trim(),
   };
 }
 

@@ -1,16 +1,19 @@
 # Recall Circles
 
-Turn passive reading into an active study loop:
+A branching, active study loop:
 
-1. Type a topic.
-2. Claude writes a short, structured passage (plus one question and its key points).
-3. You get **3:00 to learn it**.
-4. The passage **scrambles into colored circles**.
-5. You **rebuild the original order from memory** (2 hints allowed).
-6. You answer **one timed open question** (30s — type or speak it).
-7. Claude tells you whether you conveyed the **core idea**.
-8. A calm **reflect** step turns your "what next?" thought-dump into clean,
-   studiable questions saved as a reusable queue.
+1. Type a topic and set **how technical** the explanation should be (a 1–10 slider).
+2. Claude writes a short explanation, plus one question about the core idea.
+3. You get **3:00 to learn it**; then the explanation is hidden.
+4. You answer **one timed open question** (30s — type or speak it).
+5. Claude tells you whether you conveyed the **core idea**.
+6. **If you got it right**, Claude proposes a slightly adjacent **branch** —
+   **Continue** drills into it (the loop repeats, one step deeper each time).
+   If not, **give it another go** or **wrap up**.
+7. On wrap-up, a calm **reflect** step turns your "what next?" thought-dump into
+   clean, studiable questions saved as a reusable queue.
+
+A breadcrumb shows the chain of topics you've branched through this session.
 
 ## Bring your own key (BYOK)
 
@@ -37,6 +40,13 @@ export const MODEL = "claude-opus-4-8";
 
 `"claude-sonnet-4-6"` is a cheaper, still-excellent alternative for this task —
 just change that string.
+
+## Technicality slider
+
+A 1–10 slider on the input screen controls how technical the explanation is,
+from plain everyday language up to research-level depth. The value feeds the
+generation prompt (`technicalityPrompt` in `lib/constants.ts`) and persists
+across branches within a session.
 
 ## Voice input
 
@@ -65,9 +75,8 @@ Open the app, click **🔑 Add your key**, paste your Anthropic key, and go.
 
 - **Next.js (App Router) + TypeScript**, **Tailwind** (layout) with the
   prototype's inline visual language preserved.
-- **Motion** (`motion/react`, formerly framer-motion) is used surgically for the
-  pieces gliding between the pool and the slots (`layout` + `layoutId` +
-  `AnimatePresence`). Everything else (timers, background, fades) is plain CSS.
+- Animations (timer pulse, background, fades, loading dots) are plain CSS — no
+  animation library.
 - **Google Fonts** (Fraunces, Newsreader, Hanken Grotesk) are loaded via a
   `<link>` in `app/layout.tsx`'s `<head>` with `preconnect`, so the inline
   styles can reference the families by name. No font files are bundled.
