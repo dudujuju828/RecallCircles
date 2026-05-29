@@ -40,6 +40,15 @@ import SettingsModal from "./SettingsModal";
 const verdictColor = (v: string) =>
   v === "nailed it" ? "#6A994E" : v === "not quite" ? "#D85A47" : "#C7892B";
 
+// A lesson we can return to after finishing a nested "sub-question" dig-in.
+interface LessonSnapshot {
+  title: string;
+  explanation: string;
+  question: string;
+  keyPoints: string[];
+  trail: string[];
+}
+
 export default function RecallCircles() {
   const [phase, setPhase] = useState<Phase>("input");
   const [topic, setTopic] = useState("");
@@ -56,10 +65,17 @@ export default function RecallCircles() {
 
   const [response, setResponse] = useState("");
   const [timeLeft, setTimeLeft] = useState(ANSWER_SECONDS);
+  // Current round's answer clock — doubles on each "give it another go".
+  const [answerSeconds, setAnswerSeconds] = useState(ANSWER_SECONDS);
   const [readLeft, setReadLeft] = useState(READ_SECONDS);
   const [result, setResult] = useState<Response | null>(null);
   const [graderError, setGraderError] = useState(false);
   const [error, setError] = useState("");
+
+  // Sub-question flow: a stack of lessons to come back to once a dig-in is nailed.
+  const [stack, setStack] = useState<LessonSnapshot[]>([]);
+  const [askingSub, setAskingSub] = useState(false);
+  const [subText, setSubText] = useState("");
 
   // BYOK key state.
   const [apiKey, setApiKey] = useState("");
@@ -149,7 +165,7 @@ export default function RecallCircles() {
     targetTopic: string,
     fromTopic: string | null,
     trailMode: "reset" | "push" | "keep",
-    remediate = false
+    remediate: "light" | "deep" | null = null
   ) {
     const t = targetTopic.trim();
     if (!t) return;
@@ -172,7 +188,11 @@ export default function RecallCircles() {
       setQuestion(lesson.question);
       setKeyPoints(lesson.keyPoints);
       setResult(null);
-      if (trailMode === "reset") setHistory([]); // new session — forget old Q&A
+      if (trailMode === "reset") {
+        setHistory([]); // new session — forget old Q&A
+        setStack([]); // and drop any unfinished sub-question chain
+        setAnswerSeconds(ANSWER_SECONDS);
+      }
       setTrail((prev) => {
         if (trailMode === "reset") return [lesson.title];
         if (trailMode === "push") return [...prev, lesson.title];
@@ -207,20 +227,50 @@ export default function RecallCircles() {
     runGenerate(nb, title, "push");
   }
 
-  // After a "not quite": re-explain the same topic, deeper and reasoning-first.
-  function reexplainDeeper() {
-    runGenerate(topic, null, "keep", true);
+  // Re-explain the same topic after an imperfect answer: "light" = a touch
+  // fuller (on the right track), "deep" = deeper + reasoning-first (not quite).
+  function reexplain(level: "light" | "deep") {
+    runGenerate(topic, null, "keep", level);
+  }
+
+  // Dig into a separate sub-question, remembering the current lesson so we can
+  // return to it once the sub-question is nailed. Sub-questions can nest.
+  function askSubQuestion() {
+    const sub = subText.trim();
+    if (!sub) return;
+    setStack((s) => [
+      ...s,
+      { title, explanation, question, keyPoints, trail },
+    ]);
+    setAskingSub(false);
+    setSubText("");
+    runGenerate(sub, title, "push");
+  }
+
+  // Pop back to the lesson we were on before the sub-question, to re-answer it.
+  function returnToOriginal() {
+    const prev = stack[stack.length - 1];
+    if (!prev) return;
+    setStack((s) => s.slice(0, -1));
+    setTitle(prev.title);
+    setExplanation(prev.explanation);
+    setQuestion(prev.question);
+    setKeyPoints(prev.keyPoints);
+    setTrail(prev.trail);
+    startQuestion(); // fresh attempt at the original question
   }
 
   /* ----------------------------- timed question ---------------------------- */
-  // Used both for the first question after the explanation and for "give it
-  // another go" — both reset to a fresh ANSWER_SECONDS clock.
-  function startQuestion() {
+  // First question after an explanation resets to the base clock. "Give it
+  // another go" passes doubleTime, which doubles the previous round's clock.
+  function startQuestion(doubleTime = false) {
     tts.stop(); // the explanation gets hidden now — don't keep narrating it
     setResponse("");
     setResult(null);
     submittedRef.current = false;
-    setTimeLeft(ANSWER_SECONDS);
+    const secs = doubleTime ? answerSeconds * 2 : ANSWER_SECONDS;
+    setAnswerSeconds(secs);
+    setTimeLeft(secs);
     setPhase("question");
   }
 
@@ -358,6 +408,10 @@ export default function RecallCircles() {
     setPickS(new Set());
     setPickT(new Set());
     setHistory([]);
+    setStack([]);
+    setAskingSub(false);
+    setSubText("");
+    setAnswerSeconds(ANSWER_SECONDS);
     setTopic("");
     setTrail([]);
     setResult(null);
@@ -1183,7 +1237,7 @@ export default function RecallCircles() {
                   animation: timeLeft <= 10 ? "rcb-pulse 1s infinite" : "none",
                 }}
               >
-                {timeLeft}s
+                {timeLeft >= 60 ? fmt(timeLeft) : `${timeLeft}s`}
               </span>
             </div>
             <div
@@ -1198,7 +1252,7 @@ export default function RecallCircles() {
               <div
                 style={{
                   height: "100%",
-                  width: `${(timeLeft / ANSWER_SECONDS) * 100}%`,
+                  width: `${(timeLeft / answerSeconds) * 100}%`,
                   background: timeLeft <= 10 ? "#D85A47" : "#E4572E",
                   transition: "width 1s linear",
                 }}
@@ -1325,9 +1379,34 @@ export default function RecallCircles() {
             </div>
 
             {(() => {
+              const inSub = stack.length > 0;
               const correct = !graderError && result.verdict === "nailed it";
-              const canBranch = correct && !!result.nextBranch.trim();
+              const canBranch = correct && !inSub && !!result.nextBranch.trim();
+              const canReturn = correct && inSub;
               const notQuite = !graderError && result.verdict === "not quite";
+              const onTrack = !graderError && result.verdict === "on the right track";
+              const imperfect = notQuite || onTrack;
+              const original = inSub ? stack[stack.length - 1].title : "";
+
+              const primaryStyle = {
+                padding: "14px 26px",
+                borderRadius: 14,
+                fontSize: 15,
+                fontWeight: 700,
+                background: "#E4572E",
+                color: "#fff",
+                boxShadow: "0 8px 22px rgba(228,87,46,.35)",
+              };
+              const subtleStyle = {
+                padding: "14px 22px",
+                borderRadius: 14,
+                fontSize: 15,
+                fontWeight: 600,
+                background: "#FFFDF8",
+                color: "#5C5345",
+                boxShadow: "inset 0 0 0 1.5px #D8CBB2",
+              };
+
               return (
                 <>
                   {canBranch && (
@@ -1366,10 +1445,18 @@ export default function RecallCircles() {
                     </div>
                   )}
 
-                  {notQuite && (
+                  {canReturn && (
                     <p style={{ marginTop: 20, color: "#7A6F5E", fontSize: 15, lineHeight: 1.5 }}>
-                      Let&apos;s take another run at it — here&apos;s a deeper
-                      explanation that walks through the reasoning.
+                      Sub-question solved — back to <strong>{original}</strong> to take
+                      another crack at it.
+                    </p>
+                  )}
+
+                  {imperfect && (
+                    <p style={{ marginTop: 20, color: "#7A6F5E", fontSize: 15, lineHeight: 1.5 }}>
+                      {notQuite
+                        ? "Let's take another run at it — a deeper explanation that walks through the reasoning, or dig into a sub-question first."
+                        : "So close — get a fuller explanation to lock it in, take another go, or dig into a sub-question first."}
                     </p>
                   )}
 
@@ -1377,70 +1464,100 @@ export default function RecallCircles() {
                     style={{ display: "flex", gap: 12, marginTop: 22, flexWrap: "wrap" }}
                   >
                     {canBranch ? (
-                      <button
-                        className="rcb-btn"
-                        onClick={continueBranch}
-                        style={{
-                          padding: "14px 26px",
-                          borderRadius: 14,
-                          fontSize: 15,
-                          fontWeight: 700,
-                          background: "#E4572E",
-                          color: "#fff",
-                          boxShadow: "0 8px 22px rgba(228,87,46,.35)",
-                        }}
-                      >
+                      <button className="rcb-btn" onClick={continueBranch} style={primaryStyle}>
                         Continue → {result.nextBranch}
+                      </button>
+                    ) : canReturn ? (
+                      <button className="rcb-btn" onClick={returnToOriginal} style={primaryStyle}>
+                        ← Back to {original}
                       </button>
                     ) : notQuite ? (
                       <button
                         className="rcb-btn"
-                        onClick={reexplainDeeper}
-                        style={{
-                          padding: "14px 26px",
-                          borderRadius: 14,
-                          fontSize: 15,
-                          fontWeight: 700,
-                          background: "#E4572E",
-                          color: "#fff",
-                          boxShadow: "0 8px 22px rgba(228,87,46,.35)",
-                        }}
+                        onClick={() => reexplain("deep")}
+                        style={primaryStyle}
                       >
                         Explain it again, in more depth →
+                      </button>
+                    ) : onTrack ? (
+                      <button
+                        className="rcb-btn"
+                        onClick={() => reexplain("light")}
+                        style={primaryStyle}
+                      >
+                        Explain it more fully →
                       </button>
                     ) : (
                       <button
                         className="rcb-btn"
-                        onClick={startQuestion}
-                        style={{
-                          padding: "14px 26px",
-                          borderRadius: 14,
-                          fontSize: 15,
-                          fontWeight: 700,
-                          background: "#E4572E",
-                          color: "#fff",
-                          boxShadow: "0 8px 22px rgba(228,87,46,.35)",
-                        }}
+                        onClick={() => startQuestion(true)}
+                        style={primaryStyle}
                       >
                         Give it another go
                       </button>
                     )}
-                    <button
-                      className="rcb-btn"
-                      onClick={startReflect}
-                      style={{
-                        padding: "14px 22px",
-                        borderRadius: 14,
-                        fontSize: 15,
-                        fontWeight: 600,
-                        background: "#FFFDF8",
-                        color: "#5C5345",
-                        boxShadow: "inset 0 0 0 1.5px #D8CBB2",
-                      }}
-                    >
+
+                    {imperfect && (
+                      <>
+                        <button
+                          className="rcb-btn"
+                          onClick={() => startQuestion(true)}
+                          style={subtleStyle}
+                        >
+                          Give it another go
+                        </button>
+                        <button
+                          className="rcb-btn"
+                          onClick={() => {
+                            setSubText("");
+                            setAskingSub((v) => !v);
+                          }}
+                          style={subtleStyle}
+                        >
+                          Ask a sub-question
+                        </button>
+                      </>
+                    )}
+
+                    <button className="rcb-btn" onClick={startReflect} style={subtleStyle}>
                       Wrap up
                     </button>
                   </div>
+
+                  {askingSub && imperfect && (
+                    <div style={{ marginTop: 16 }}>
+                      <p style={{ fontSize: 13, color: "#7A6F5E", margin: "0 0 8px" }}>
+                        What smaller thing do you want to nail first? You&apos;ll come
+                        right back here after.
+                      </p>
+                      <AnswerField
+                        value={subText}
+                        setValue={setSubText}
+                        rows={2}
+                        placeholder="e.g. what exactly is an event horizon?"
+                      />
+                      <div style={{ display: "flex", gap: 12, marginTop: 12, flexWrap: "wrap" }}>
+                        <button
+                          className="rcb-btn"
+                          onClick={askSubQuestion}
+                          disabled={!subText.trim()}
+                          style={primaryStyle}
+                        >
+                          Dig into it →
+                        </button>
+                        <button
+                          className="rcb-btn"
+                          onClick={() => {
+                            setAskingSub(false);
+                            setSubText("");
+                          }}
+                          style={subtleStyle}
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    </div>
+                  )}
                 </>
               );
             })()}

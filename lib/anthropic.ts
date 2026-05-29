@@ -10,8 +10,12 @@ export interface GenOptions {
   tech: number;
   scope: number;
   size: number;
-  /** Re-explain after a "not quite": go deeper and foreground the reasoning. */
-  remediate?: boolean;
+  /**
+   * Re-explanation intensity after an imperfect answer:
+   * "light" (on the right track) = a bit fuller and clearer;
+   * "deep"  (not quite)          = deeper and reasoning-first.
+   */
+  remediate?: "light" | "deep" | null;
 }
 
 /*
@@ -159,10 +163,13 @@ Follow all three of these dials:
 - Length (${opts.size}/10): ${sizePrompt(opts.size)}
 
 ${
-  opts.remediate
+  opts.remediate === "deep"
     ? `The learner just tried to explain this back and did NOT get the core idea. Go somewhat deeper than the length dial alone implies, and foreground the REASONING: walk through the causal why and how step by step — the chain of logic that makes the central idea click — rather than just stating facts or definitions.
 `
-    : ""
+    : opts.remediate === "light"
+      ? `The learner was on the right track but didn't fully nail the core idea. Give a slightly fuller and clearer explanation than usual, adding a little more detail and a crisper through-line that sharpens and reinforces the central idea they nearly had.
+`
+      : ""
 }
 1. Explain the topic, obeying the technicality, scope, and length dials above. The explanation must stand alone and build logically.
 2. Pose ONE open-ended question testing whether the reader grasped the CENTRAL idea — a "why", "explain", or "what would happen if" question, never a lookup of an exact figure or name.
@@ -245,8 +252,10 @@ export async function generateExplanation(
   opts: GenOptions,
   fromTopic: string | null = null
 ): Promise<Lesson> {
-  // A "not quite" re-explanation gets a depth bump on top of the size dial.
-  const size = opts.remediate ? Math.min(10, opts.size + 2) : opts.size;
+  // A re-explanation bumps length on top of the size dial: deeper for a
+  // "not quite", a touch fuller for "on the right track".
+  const bump = opts.remediate === "deep" ? 2 : opts.remediate === "light" ? 1 : 0;
+  const size = Math.min(10, opts.size + bump);
   const raw = await callClaude(
     apiKey,
     buildExplainPrompt(topic, { ...opts, size }, fromTopic),
