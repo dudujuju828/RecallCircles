@@ -12,13 +12,14 @@ import {
   technicalityLabel,
 } from "@/lib/constants";
 import { fmt } from "@/lib/utils";
-import type { Phase, QueueItem, Response } from "@/lib/types";
+import type { AnswerRecord, Phase, QueueItem, Response } from "@/lib/types";
 import {
   errorMessage,
   generateExplanation,
   isAuthError,
   respondToAnswer,
   splitThoughts,
+  suggestTopics,
 } from "@/lib/anthropic";
 import {
   clearKey,
@@ -68,6 +69,12 @@ export default function RecallCircles() {
   const [reflectInput, setReflectInput] = useState("");
   const [tidying, setTidying] = useState(false);
   const [tidied, setTidied] = useState<string[] | null>(null);
+
+  // Every answered question this session — feeds the "suggest next" call.
+  const [history, setHistory] = useState<AnswerRecord[]>([]);
+  // AI-suggested topics to look into next, based on how they answered.
+  const [suggested, setSuggested] = useState<string[]>([]);
+  const [suggesting, setSuggesting] = useState(false);
 
   // First-touch voice-model download overlay (delayed so cached loads don't flash).
   const [showVoiceOverlay, setShowVoiceOverlay] = useState(false);
@@ -149,6 +156,7 @@ export default function RecallCircles() {
       setQuestion(lesson.question);
       setKeyPoints(lesson.keyPoints);
       setResult(null);
+      if (resetTrail) setHistory([]); // brand-new session — forget the old Q&A
       setTrail((prev) => (resetTrail ? [lesson.title] : [...prev, lesson.title]));
       // A queued curiosity has now become a round — retire it.
       if (pendingQueueId) {
@@ -235,6 +243,7 @@ export default function RecallCircles() {
     setPhase("grading");
     setGraderError(false);
     let spoken = "";
+    let verdict: Response["verdict"] = "on the right track";
     try {
       const r = await respondToAnswer(apiKey, {
         explanation,
@@ -244,6 +253,7 @@ export default function RecallCircles() {
       });
       setResult(r);
       spoken = r.feedback;
+      verdict = r.verdict;
     } catch (e) {
       if (isAuthError(e)) {
         setAuthError("That key was rejected — check it and try again.");
@@ -262,6 +272,11 @@ export default function RecallCircles() {
       });
       spoken = fallback;
     }
+    // Remember this Q&A so wrap-up can suggest where to go next.
+    setHistory((h) => [
+      ...h,
+      { title, question, answer: (text || "").trim(), verdict },
+    ]);
     setPhase("respond");
     if (tts.enabled) tts.speak(spoken);
   }
@@ -272,7 +287,25 @@ export default function RecallCircles() {
     setReflectInput("");
     setTidied(null);
     setTidying(false);
+    setSuggested([]);
+    setSuggesting(false);
     setPhase("reflect");
+    // Pull a couple of "look into next" topics from how they answered.
+    if (apiKey.trim() && history.length) runSuggest(history);
+  }
+
+  async function runSuggest(records: AnswerRecord[]) {
+    setSuggesting(true);
+    try {
+      setSuggested(await suggestTopics(apiKey, records));
+    } catch {
+      setSuggested([]);
+    }
+    setSuggesting(false);
+  }
+
+  function removeSuggested(idx: number) {
+    setSuggested((s) => s.filter((_, i) => i !== idx));
   }
 
   function finishToInput() {
@@ -280,6 +313,9 @@ export default function RecallCircles() {
     setReflectInput("");
     setTidied(null);
     setTidying(false);
+    setSuggested([]);
+    setSuggesting(false);
+    setHistory([]);
     setTopic("");
     setTrail([]);
     setResult(null);
@@ -290,8 +326,10 @@ export default function RecallCircles() {
 
   async function submitReflect() {
     const dump = reflectInput.trim();
+    // Empty dump still advances to the review screen so the AI suggestions
+    // can be saved.
     if (!dump) {
-      finishToInput();
+      setTidied([]);
       return;
     }
     if (!apiKey.trim()) {
@@ -312,9 +350,18 @@ export default function RecallCircles() {
     setTidied((qs) => (qs ? qs.filter((_, i) => i !== idx) : qs));
   }
 
-  function saveTidied() {
-    if (tidied && tidied.length) {
-      const additions: QueueItem[] = tidied.map((text) => ({
+  function saveReflect() {
+    // Merge AI suggestions + the user's tidied notes, de-duped case-insensitively.
+    const seen = new Set<string>();
+    const texts: string[] = [];
+    for (const text of [...suggested, ...(tidied || [])]) {
+      const key = text.trim().toLowerCase();
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      texts.push(text.trim());
+    }
+    if (texts.length) {
+      const additions: QueueItem[] = texts.map((text) => ({
         id: cryptoId(),
         text,
         createdAt: Date.now(),
@@ -375,6 +422,85 @@ export default function RecallCircles() {
             : "🔊 Listen"}
       </button>
     ) : null;
+
+  const suggestionBlock = (label: string) => {
+    if (!suggesting && suggested.length === 0) return null;
+    return (
+      <div style={{ marginBottom: 22 }}>
+        <p
+          style={{
+            fontSize: 12,
+            fontWeight: 700,
+            color: "#6A994E",
+            textTransform: "uppercase",
+            letterSpacing: ".08em",
+            margin: "0 0 10px",
+          }}
+        >
+          {label}
+        </p>
+        {suggesting ? (
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 10,
+              color: "#5C5345",
+              fontFamily: "'Fraunces',serif",
+              fontSize: 16,
+            }}
+          >
+            <span className="rcb-spinner" /> Reading how you answered…
+          </div>
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+            {suggested.map((s, idx) => (
+              <div
+                key={idx}
+                style={{
+                  display: "flex",
+                  alignItems: "flex-start",
+                  gap: 12,
+                  padding: "14px 16px",
+                  borderRadius: 14,
+                  background: "#EDF5E6",
+                  border: "1px solid #A9CC8E",
+                }}
+              >
+                <span style={{ flexShrink: 0, fontSize: 16, paddingTop: 1 }}>✨</span>
+                <span
+                  style={{
+                    flex: 1,
+                    fontFamily: "'Newsreader', serif",
+                    fontSize: 17,
+                    lineHeight: 1.4,
+                    color: "#2B241B",
+                  }}
+                >
+                  {s}
+                </span>
+                <button
+                  className="rcb-btn"
+                  aria-label="Remove"
+                  onClick={() => removeSuggested(idx)}
+                  style={{
+                    background: "transparent",
+                    color: "#7FA968",
+                    fontSize: 18,
+                    lineHeight: 1,
+                    padding: "0 4px",
+                    fontWeight: 700,
+                  }}
+                >
+                  ×
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  };
 
   const Breadcrumb = () =>
     trail.length > 0 ? (
@@ -1266,10 +1392,11 @@ export default function RecallCircles() {
                 >
                   What do you want to look into next?
                 </h2>
-                <p style={{ margin: "0 0 16px", color: "#7A6F5E", fontSize: 15, lineHeight: 1.5 }}>
+                <p style={{ margin: "0 0 20px", color: "#7A6F5E", fontSize: 15, lineHeight: 1.5 }}>
                   Dump whatever&apos;s rattling around — half-formed is fine. We&apos;ll
                   tidy it into clean questions you can study later.
                 </p>
+                {suggestionBlock("From how you answered — worth a look")}
                 {tidying ? (
                   <div
                     style={{
@@ -1296,7 +1423,7 @@ export default function RecallCircles() {
                       <button
                         className="rcb-btn"
                         onClick={submitReflect}
-                        disabled={!reflectInput.trim()}
+                        disabled={!reflectInput.trim() && suggested.length === 0}
                         style={{
                           padding: "14px 26px",
                           borderRadius: 14,
@@ -1307,7 +1434,7 @@ export default function RecallCircles() {
                           boxShadow: "0 8px 22px rgba(33,27,20,.3)",
                         }}
                       >
-                        Tidy into questions →
+                        {reflectInput.trim() ? "Tidy into questions →" : "Review suggestions →"}
                       </button>
                       <button
                         className="rcb-btn"
@@ -1340,14 +1467,29 @@ export default function RecallCircles() {
                     margin: "0 0 12px",
                   }}
                 >
-                  {tidied.length ? "Save these for later?" : "Nothing to save"}
+                  {suggested.length || tidied.length ? "Save these for later?" : "Nothing to save"}
                 </p>
-                {tidied.length === 0 ? (
+                {suggestionBlock("Suggested from your answers")}
+                {tidied.length === 0 && reflectInput.trim() && (
                   <p style={{ color: "#7A6F5E", fontSize: 16, margin: "0 0 18px" }}>
-                    Couldn&apos;t pull a clear question out of that — no worries.
+                    Couldn&apos;t pull a clear question out of your notes — no worries.
                   </p>
-                ) : (
-                  <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 20 }}>
+                )}
+                {tidied.length > 0 && (
+                  <>
+                    <p
+                      style={{
+                        fontSize: 12,
+                        fontWeight: 700,
+                        color: "#9A8F7C",
+                        textTransform: "uppercase",
+                        letterSpacing: ".08em",
+                        margin: "0 0 10px",
+                      }}
+                    >
+                      From your notes
+                    </p>
+                    <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 20 }}>
                     {tidied.map((q, idx) => (
                       <div
                         key={idx}
@@ -1406,12 +1548,13 @@ export default function RecallCircles() {
                         </button>
                       </div>
                     ))}
-                  </div>
+                    </div>
+                  </>
                 )}
                 <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
                   <button
                     className="rcb-btn"
-                    onClick={saveTidied}
+                    onClick={saveReflect}
                     style={{
                       padding: "14px 26px",
                       borderRadius: 14,
@@ -1422,9 +1565,9 @@ export default function RecallCircles() {
                       boxShadow: "0 8px 22px rgba(228,87,46,.35)",
                     }}
                   >
-                    {tidied.length ? "Save to my list →" : "Done →"}
+                    {suggested.length || tidied.length ? "Save to my list →" : "Done →"}
                   </button>
-                  {tidied.length > 0 && (
+                  {(suggested.length > 0 || tidied.length > 0) && (
                     <button
                       className="rcb-btn"
                       onClick={finishToInput}

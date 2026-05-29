@@ -35,3 +35,11 @@ export interface QueueItem {
   createdAt: number;
   sourceTopic: string;
 }
+
+/** One answered question in a session — fed to the "suggest next" call. */
+export interface AnswerRecord {
+  title: string;
+  question: string;
+  answer: string;
+  verdict: Verdict;
+}

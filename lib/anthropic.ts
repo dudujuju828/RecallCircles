@@ -1,4 +1,4 @@
-import type { Lesson, Response, Verdict } from "./types";
+import type { AnswerRecord, Lesson, Response, Verdict } from "./types";
 import { technicalityPrompt } from "./constants";
 
 /*
@@ -186,6 +186,31 @@ Respond with ONLY valid JSON, no preamble and no code fences:
 If the dump is empty or yields nothing usable, return {"questions":[]}.`;
 }
 
+function buildSuggestPrompt(history: AnswerRecord[]): string {
+  const transcript = history
+    .map(
+      (h, i) =>
+        `${i + 1}. Topic: ${h.title}\n   Asked: ${h.question}\n   They answered: "${
+          h.answer || "(left blank)"
+        }"\n   Judged: ${h.verdict}`
+    )
+    .join("\n");
+  return `You suggest what a learner should study next, based on how they did in a study session.
+
+Here is the session — each item is a topic, the question they were asked, their answer, and how it was judged:
+${transcript}
+
+Suggest 2 (at most 3) topics worth looking into next. Lean on what their answers reveal: a misconception to shore up where they were shaky, the natural next concept after what they grasped, or an adjacent idea their answers kept reaching toward.
+Each suggestion must:
+- stand on its own (name the subject explicitly — no "it"/"that"/"this thing"),
+- read like something you could hand to a tutor as a fresh topic,
+- not be a near-duplicate of a topic already covered above.
+
+Respond with ONLY valid JSON, no preamble and no code fences:
+{"topics":["...","..."]}
+If the session is too thin to suggest anything useful, return {"topics":[]}.`;
+}
+
 /* ------------------------------ API calls ------------------------------ */
 
 export async function generateExplanation(
@@ -232,6 +257,20 @@ export async function respondToAnswer(
     feedback: String(parsed.feedback ?? "").trim(),
     nextBranch: String(parsed.nextBranch ?? "").trim(),
   };
+}
+
+export async function suggestTopics(
+  apiKey: string,
+  history: AnswerRecord[]
+): Promise<string[]> {
+  if (!history.length) return [];
+  const raw = await callClaude(apiKey, buildSuggestPrompt(history));
+  const parsed = parseJson<{ topics?: unknown }>(raw);
+  if (!Array.isArray(parsed.topics)) return [];
+  return parsed.topics
+    .map((t) => String(t).trim())
+    .filter(Boolean)
+    .slice(0, 3);
 }
 
 export async function splitThoughts(

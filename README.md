@@ -10,8 +10,10 @@ A branching, active study loop:
 6. **If you got it right**, Claude proposes a slightly adjacent **branch** —
    **Continue** drills into it (the loop repeats, one step deeper each time).
    If not, **give it another go** or **wrap up**.
-7. On wrap-up, a calm **reflect** step turns your "what next?" thought-dump into
-   clean, studiable questions saved as a reusable queue.
+7. On wrap-up, a calm **reflect** step both **suggests a couple of topics to
+   look into next** — drawn from how you answered the session's questions — and
+   turns your own "what next?" thought-dump into clean, studiable questions.
+   Whatever you keep is saved to a reusable queue.
 
 A breadcrumb shows the chain of topics you've branched through this session, and
 the explanation and feedback can be **read aloud** by a neural voice running
