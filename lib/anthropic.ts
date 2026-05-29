@@ -264,6 +264,10 @@ function buildExplainPrompt(
 `
         : "";
 
+  // Always-on: name the right things, and make their meaning clear.
+  const termsLine =
+    " Use accurate, descriptive terminology: name the key terms and concepts that genuinely belong to this topic, use them correctly, and make each one's meaning clear as you introduce it (calibrated to the technicality level) so the learner picks up the right vocabulary.";
+
   if (fixedQuestion) {
     // Lesson-plan step: the question is fixed; teach toward it.
     const coveredLine = covered.length
@@ -281,7 +285,7 @@ Follow all three of these dials:
 - Scope (${opts.scope}/10): ${scopePrompt(opts.scope)}
 - Length (${opts.size}/10): ${sizePrompt(opts.size)}
 
-${remediateLine}1. Write an explanation that teaches exactly what the learner needs to answer the question above well, obeying the dials. It must stand alone and build logically.
+${remediateLine}1. Write an explanation that teaches exactly what the learner needs to answer the question above well, obeying the dials. It must stand alone and build logically.${termsLine}
 2. List 1-3 short key points a correct answer to that question must convey.
 
 Respond with ONLY valid JSON, no preamble and no code fences:
@@ -297,7 +301,7 @@ Follow all three of these dials:
 - Scope (${opts.scope}/10): ${scopePrompt(opts.scope)}
 - Length (${opts.size}/10): ${sizePrompt(opts.size)}
 
-${remediateLine}1. Explain the topic, obeying the technicality, scope, and length dials above. The explanation must stand alone and build logically.
+${remediateLine}1. Explain the topic, obeying the technicality, scope, and length dials above. The explanation must stand alone and build logically.${termsLine}
 2. Pose ONE open-ended question testing whether the reader grasped the CENTRAL idea — a "why", "explain", or "what would happen if" question, never a lookup of an exact figure or name.
 3. List 1-3 short key points a correct answer must convey.
 

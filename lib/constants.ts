@@ -39,7 +39,9 @@ export function technicalityLabel(n: number): string {
 
 /** The technicality instruction handed to the model — a monotonic 1–10 dial. */
 export function technicalityPrompt(n: number): string {
-  return `Pitch the vocabulary and conceptual depth to technicality ${n} on a strict 1–10 scale, where 1 is the plainest everyday language a curious child could follow (no jargon, vivid simple analogies) and 10 is rigorous, research-level prose with precise technical terminology and no hand-holding. Treat ${n} as an exact dial, not a band: a ${n} must read as distinctly more technical and assume more background than ${n - 1}, and less than ${n + 1}.`;
+  return `Pitch the vocabulary and conceptual depth to technicality ${n} on a strict 1–10 scale. At 1, use the plainest everyday language a curious child could follow — no jargon, simple analogies. As the level rises, increase the PRECISION OF TERMINOLOGY and the DEPTH of the concepts: bring in the field's proper terms and use them correctly (defining each briefly the first time it appears), and engage with more mechanism and nuance. At 10 it should read like an expert explaining to a knowledgeable peer — exact domain vocabulary, fine distinctions, no hand-holding.
+Crucially, higher technicality means richer, more precise WORDS and deeper conceptual reasoning — it does NOT mean mathematics. Do not add equations, formulas, derivations, or mathematical notation unless the learner's topic is itself explicitly mathematical; explain even quantitative relationships in precise prose.
+Treat ${n} as an exact dial, not a band: a ${n} must read as distinctly more technical and assume more background than ${n - 1}, and less than ${n + 1}.`;
 }
 
 /** Scope: how broad vs. narrow the explanation is relative to the question. */

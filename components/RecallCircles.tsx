@@ -470,6 +470,21 @@ export default function RecallCircles() {
     setPhase("question");
   }
 
+  // Skip the current question without answering/grading — move the flow on.
+  // In a lesson: jump to the next question (or finish). In a sub-question:
+  // abandon it and return to the original. In free explore: end the thread.
+  function skipQuestion() {
+    submittedRef.current = true; // stop the answer timer from also firing
+    tts.stop();
+    if (stack.length > 0) {
+      returnToOriginal();
+    } else if (planActive) {
+      nextPlanQuestion();
+    } else {
+      finishToInput();
+    }
+  }
+
   // READ countdown — auto-advances to the question at 0.
   useEffect(() => {
     if (phase !== "explain") return;
@@ -1717,22 +1732,40 @@ export default function RecallCircles() {
               autoFocus
               placeholder="Type or speak your answer — just get the idea across…"
             />
-            <button
-              className="rcb-btn"
-              onClick={() => submitAnswer(response)}
-              style={{
-                marginTop: 16,
-                padding: "14px 28px",
-                borderRadius: 14,
-                fontSize: 16,
-                fontWeight: 700,
-                background: "#E4572E",
-                color: "#fff",
-                boxShadow: "0 8px 22px rgba(228,87,46,.35)",
-              }}
-            >
-              Submit now
-            </button>
+            <div style={{ display: "flex", gap: 12, marginTop: 16, flexWrap: "wrap", alignItems: "center" }}>
+              <button
+                className="rcb-btn"
+                onClick={() => submitAnswer(response)}
+                style={{
+                  padding: "14px 28px",
+                  borderRadius: 14,
+                  fontSize: 16,
+                  fontWeight: 700,
+                  background: "#E4572E",
+                  color: "#fff",
+                  boxShadow: "0 8px 22px rgba(228,87,46,.35)",
+                }}
+              >
+                Submit now
+              </button>
+              <button
+                className="rcb-btn"
+                onClick={skipQuestion}
+                style={{
+                  background: "transparent",
+                  color: "#9A8F7C",
+                  fontSize: 14,
+                  fontWeight: 600,
+                  padding: "8px 6px",
+                }}
+              >
+                {stack.length > 0
+                  ? "Skip — back to original"
+                  : planActive
+                    ? "Skip this question →"
+                    : "Skip →"}
+              </button>
+            </div>
           </div>
         )}
 
@@ -2027,6 +2060,15 @@ export default function RecallCircles() {
                         >
                           Ask a sub-question
                         </button>
+                        {inPlan && (
+                          <button
+                            className="rcb-btn"
+                            onClick={nextPlanQuestion}
+                            style={subtleStyle}
+                          >
+                            {lastQ ? "Skip — finish lesson →" : "Skip to next question →"}
+                          </button>
+                        )}
                       </>
                     )}
 
