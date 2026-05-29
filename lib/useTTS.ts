@@ -6,17 +6,17 @@ import { useCallback, useEffect, useRef, useState } from "react";
  * Local text-to-speech.
  *
  * Primary path: Kokoro-82M, a neural voice model, run *locally in the browser
- * on the GPU via WebGPU*. It loads inside a Web Worker (built from a Blob so it
- * never touches Next's bundler) that dynamically imports `kokoro-js` from a CDN.
- * The model is generated sentence-by-sentence and streamed back, so the first
- * audio starts almost immediately and playback is gapless via the Web Audio API.
+ * on the GPU via WebGPU*. It runs inside a same-origin module Web Worker
+ * (`/tts-worker.js`) that imports `kokoro-js` from a CDN at runtime — so the
+ * heavy ML libs never enter the bundle. The worker returns raw PCM per
+ * sentence; the main thread schedules the chunks back-to-back through the Web
+ * Audio API so the first audio starts almost immediately and plays gaplessly.
  *
  * Fallback: the browser's built-in speechSynthesis (OS voices) — instant, no
- * download — used wherever WebGPU is unavailable (Firefox/Safari). If neither
- * exists, TTS is simply unsupported and the UI hides it.
+ * download — used wherever WebGPU is unavailable (Firefox/Safari) or the model
+ * can't load. If neither exists, TTS is unsupported and the UI hides it.
  *
- * Nothing here touches a server or an API key — it stays consistent with the
- * app's serverless / BYOK design.
+ * Nothing here touches a server or an API key.
  */
 
 const VOICE = "af_heart"; // a warm American voice; see kokoro-js list_voices()
@@ -25,76 +25,12 @@ const STORE = "recall-circles:voice";
 type Engine = "webgpu" | "speech" | "none";
 type Status = "idle" | "loading" | "speaking";
 
-// The worker source. Plain JS, kept as a string so the bundler never processes
-// the heavy ML imports — they load from a CDN at runtime instead.
-const WORKER_SRC = `
-let tts = null;
-const cancelled = new Set();
-
-self.onmessage = async (e) => {
-  const msg = e.data;
-
-  if (msg.type === "load") {
-    try {
-      const mod = await import("https://cdn.jsdelivr.net/npm/kokoro-js/+esm");
-      const KokoroTTS = mod.KokoroTTS;
-      const id = "onnx-community/Kokoro-82M-v1.0-ONNX";
-      try {
-        tts = await KokoroTTS.from_pretrained(id, { dtype: "fp16", device: "webgpu" });
-      } catch (e1) {
-        tts = await KokoroTTS.from_pretrained(id, { dtype: "fp32", device: "webgpu" });
-      }
-      self.postMessage({ type: "loaded" });
-    } catch (err) {
-      self.postMessage({ type: "load-error", message: String((err && err.message) || err) });
-    }
-    return;
-  }
-
-  if (msg.type === "generate") {
-    const id = msg.id;
-    try {
-      const parts = msg.text.match(/[^.!?]+[.!?]+|\\S[^.!?]*$/g) || [msg.text];
-      let i = 0;
-      for (const part of parts) {
-        if (cancelled.has(id)) break;
-        const t = part.trim();
-        if (!t) continue;
-        const audio = await tts.generate(t, { voice: msg.voice });
-        if (cancelled.has(id)) break;
-        const raw = audio.toWav();
-        const ab = raw instanceof ArrayBuffer ? raw : raw.buffer;
-        self.postMessage({ type: "audio", id: id, index: i++, wav: ab }, [ab]);
-      }
-      self.postMessage({ type: "generated", id: id });
-    } catch (err) {
-      self.postMessage({ type: "gen-error", id: id, message: String((err && err.message) || err) });
-    } finally {
-      cancelled.delete(id);
-    }
-    return;
-  }
-
-  if (msg.type === "cancel") {
-    cancelled.add(msg.id);
-  }
-};
-`;
-
-let workerBlobUrl: string | null = null;
-function getWorkerUrl(): string {
-  if (!workerBlobUrl) {
-    const blob = new Blob([WORKER_SRC], { type: "text/javascript" });
-    workerBlobUrl = URL.createObjectURL(blob);
-  }
-  return workerBlobUrl;
-}
-
 export interface TTS {
   supported: boolean;
   engine: Engine;
   enabled: boolean;
   status: Status;
+  error: string | null;
   toggle: () => void;
   speak: (text: string) => void;
   stop: () => void;
@@ -104,6 +40,7 @@ export function useTTS(): TTS {
   const [engine, setEngine] = useState<Engine>("none");
   const [enabled, setEnabled] = useState(false);
   const [status, setStatus] = useState<Status>("idle");
+  const [error, setError] = useState<string | null>(null);
 
   const engineRef = useRef<Engine>("none");
   const enabledRef = useRef(false);
@@ -115,7 +52,6 @@ export function useTTS(): TTS {
   const playingRef = useRef(0);
   const nextStartRef = useRef(0);
   const genIdRef = useRef(0);
-  const decodeChainRef = useRef<Promise<void>>(Promise.resolve());
 
   /* ---------------------------- engine detect ---------------------------- */
   useEffect(() => {
@@ -125,6 +61,8 @@ export function useTTS(): TTS {
       eng = "speech";
     engineRef.current = eng;
     setEngine(eng);
+    // eslint-disable-next-line no-console
+    console.log("[tts] engine detected:", eng);
     try {
       if (eng !== "none" && localStorage.getItem(STORE) === "1") {
         enabledRef.current = true;
@@ -148,18 +86,32 @@ export function useTTS(): TTS {
     return ctxRef.current;
   }, []);
 
+  // Unlock audio on the first user interaction so autoplay (which fires after an
+  // async API call, outside the original gesture) isn't blocked by the browser.
+  useEffect(() => {
+    const unlock = () => {
+      const ctx = ensureCtx();
+      ctx?.resume().catch(() => {});
+      window.removeEventListener("pointerdown", unlock);
+      window.removeEventListener("keydown", unlock);
+    };
+    window.addEventListener("pointerdown", unlock);
+    window.addEventListener("keydown", unlock);
+    return () => {
+      window.removeEventListener("pointerdown", unlock);
+      window.removeEventListener("keydown", unlock);
+    };
+  }, [ensureCtx]);
+
   /* ------------------------------ playback ------------------------------- */
-  const enqueueWav = useCallback(
-    async (wav: ArrayBuffer, forId: number) => {
+  const enqueuePcm = useCallback(
+    (pcm: ArrayBuffer, sr: number, forId: number) => {
       const ctx = ctxRef.current;
       if (!ctx || forId !== genIdRef.current) return;
-      let buf: AudioBuffer;
-      try {
-        buf = await ctx.decodeAudioData(wav);
-      } catch {
-        return;
-      }
-      if (forId !== genIdRef.current) return;
+      const f32 = new Float32Array(pcm);
+      if (!f32.length) return;
+      const buf = ctx.createBuffer(1, f32.length, sr || 24000);
+      buf.getChannelData(0).set(f32);
       const src = ctx.createBufferSource();
       src.buffer = buf;
       src.connect(ctx.destination);
@@ -180,17 +132,18 @@ export function useTTS(): TTS {
 
   const ensureWorker = useCallback((): Promise<void> => {
     if (workerReadyRef.current) return workerReadyRef.current;
-    const worker = new Worker(getWorkerUrl(), { type: "module" });
+    // eslint-disable-next-line no-console
+    console.log("[tts] starting worker /tts-worker.js");
+    const worker = new Worker("/tts-worker.js", { type: "module" });
     workerRef.current = worker;
     worker.addEventListener("message", (e: MessageEvent) => {
       const m = e.data;
       if (m.type === "audio") {
-        const ab = m.wav as ArrayBuffer;
-        const forId = m.id as number;
-        decodeChainRef.current = decodeChainRef.current
-          .then(() => enqueueWav(ab, forId))
-          .catch(() => {});
+        enqueuePcm(m.pcm as ArrayBuffer, m.sampling_rate as number, m.id as number);
       } else if (m.type === "gen-error") {
+        // eslint-disable-next-line no-console
+        console.error("[tts] generate error:", m.message);
+        setError("The voice hiccuped generating audio. See the console for details.");
         if (m.id === genIdRef.current && playingRef.current <= 0) setStatus("idle");
       }
     });
@@ -198,9 +151,13 @@ export function useTTS(): TTS {
       const onLoad = (e: MessageEvent) => {
         if (e.data.type === "loaded") {
           worker.removeEventListener("message", onLoad);
+          // eslint-disable-next-line no-console
+          console.log("[tts] model loaded");
           resolve();
         } else if (e.data.type === "load-error") {
           worker.removeEventListener("message", onLoad);
+          // eslint-disable-next-line no-console
+          console.error("[tts] model load error:", e.data.message);
           reject(new Error(e.data.message));
         }
       };
@@ -208,14 +165,12 @@ export function useTTS(): TTS {
       worker.postMessage({ type: "load" });
     });
     return workerReadyRef.current;
-  }, [enqueueWav]);
+  }, [enqueuePcm]);
 
   /* -------------------------------- stop --------------------------------- */
   const stop = useCallback(() => {
     genIdRef.current += 1; // invalidate in-flight chunks
-    if (workerRef.current) {
-      workerRef.current.postMessage({ type: "cancel", id: genIdRef.current - 1 });
-    }
+    workerRef.current?.postMessage({ type: "cancel", id: genIdRef.current - 1 });
     sourcesRef.current.forEach((s) => {
       try {
         s.onended = null;
@@ -236,6 +191,8 @@ export function useTTS(): TTS {
   /* ------------------------------ speak ---------------------------------- */
   const speakWithSpeech = useCallback((text: string) => {
     if (typeof window === "undefined" || !("speechSynthesis" in window)) return;
+    // eslint-disable-next-line no-console
+    console.log("[tts] speaking via browser speechSynthesis");
     window.speechSynthesis.cancel();
     const u = new SpeechSynthesisUtterance(text);
     u.rate = 1;
@@ -250,7 +207,10 @@ export function useTTS(): TTS {
       const t = (text || "").trim();
       if (!t || engineRef.current === "none") return;
       stop();
+      setError(null);
       const id = genIdRef.current;
+      // eslint-disable-next-line no-console
+      console.log("[tts] speak()", { engine: engineRef.current, chars: t.length });
 
       if (engineRef.current === "speech") {
         speakWithSpeech(t);
@@ -273,11 +233,11 @@ export function useTTS(): TTS {
         // Model couldn't load — fall back to the OS voice from here on.
         engineRef.current = "speech";
         setEngine("speech");
+        setError("GPU voice unavailable — using the browser voice instead.");
         speakWithSpeech(t);
         return;
       }
       if (id !== genIdRef.current) return; // superseded by a newer call
-      decodeChainRef.current = Promise.resolve();
       if (ctx) nextStartRef.current = ctx.currentTime;
       workerRef.current?.postMessage({ type: "generate", id, text: t, voice: VOICE });
     },
@@ -295,14 +255,16 @@ export function useTTS(): TTS {
       /* ignore */
     }
     if (next) {
-      // Unlock audio inside this user gesture and warm the model up so the
-      // first real utterance is snappy.
+      setError(null);
+      // Unlock audio inside this gesture and warm the model up so the first
+      // real utterance is snappy.
       const ctx = ensureCtx();
       ctx?.resume().catch(() => {});
       if (engineRef.current === "webgpu") {
         ensureWorker().catch(() => {
           engineRef.current = "speech";
           setEngine("speech");
+          setError("GPU voice unavailable — using the browser voice instead.");
         });
       }
     } else {
@@ -339,6 +301,7 @@ export function useTTS(): TTS {
     engine,
     enabled,
     status,
+    error,
     toggle,
     speak,
     stop,

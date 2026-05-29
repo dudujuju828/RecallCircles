@@ -494,9 +494,16 @@ export default function RecallCircles() {
             </button>
           </div>
         </div>
-        <p style={{ margin: "0 0 28px", color: "#7A6F5E", fontSize: 15 }}>
+        <p style={{ margin: "0 0 8px", color: "#7A6F5E", fontSize: 15 }}>
           Pick a topic. Read the explanation. Answer back. Branch onward.
         </p>
+        {tts.error ? (
+          <p style={{ margin: "0 0 20px", color: "#C0392B", fontSize: 13 }}>
+            🔇 {tts.error}
+          </p>
+        ) : (
+          <div style={{ height: 20 }} />
+        )}
 
         {/* ----------------------------- INPUT ----------------------------- */}
         {phase === "input" && (
