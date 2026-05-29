@@ -69,6 +69,10 @@ export default function RecallCircles() {
   const [tidying, setTidying] = useState(false);
   const [tidied, setTidied] = useState<string[] | null>(null);
 
+  // First-touch voice-model download overlay (delayed so cached loads don't flash).
+  const [showVoiceOverlay, setShowVoiceOverlay] = useState(false);
+  const [voiceOverlayDismissed, setVoiceOverlayDismissed] = useState(false);
+
   const tts = useTTS();
 
   const responseRef = useRef("");
@@ -88,6 +92,17 @@ export default function RecallCircles() {
     }
     setQueue(loadQueue());
   }, []);
+
+  // Show the download overlay only if the load is taking real time (>400ms),
+  // so a cached, near-instant load doesn't flash a screen.
+  useEffect(() => {
+    if (tts.loadingModel && !voiceOverlayDismissed) {
+      const id = setTimeout(() => setShowVoiceOverlay(true), 400);
+      return () => clearTimeout(id);
+    }
+    setShowVoiceOverlay(false);
+    if (!tts.loadingModel) setVoiceOverlayDismissed(false);
+  }, [tts.loadingModel, voiceOverlayDismissed]);
 
   /* ----------------------------- key actions ----------------------------- */
   function handleSaveKey(key: string, rememberIt: boolean) {
@@ -405,6 +420,110 @@ export default function RecallCircles() {
         onSave={handleSaveKey}
         onForget={handleForgetKey}
       />
+
+      {showVoiceOverlay && (
+        <div
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "rgba(33,27,20,.5)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            padding: 20,
+            zIndex: 60,
+            animation: "rcb-fadeup .25s both",
+          }}
+        >
+          <div
+            style={{
+              width: "100%",
+              maxWidth: 440,
+              background: "#FBF7EE",
+              borderRadius: 22,
+              padding: "30px 28px",
+              boxShadow: "0 30px 80px -30px rgba(33,27,20,.6)",
+              border: "1px solid #E4D8C0",
+              textAlign: "center",
+            }}
+          >
+            <div style={{ display: "inline-flex", gap: 12, marginBottom: 20 }}>
+              {COLORS.slice(0, 5).map((c, i) => (
+                <span
+                  key={c}
+                  style={{
+                    width: 22,
+                    height: 22,
+                    borderRadius: "50%",
+                    background: c,
+                    animation: `rcb-bob 1s ${i * 0.12}s infinite ease-in-out`,
+                  }}
+                />
+              ))}
+            </div>
+            <h2
+              style={{
+                fontFamily: "'Fraunces', serif",
+                fontWeight: 900,
+                fontSize: 22,
+                margin: "0 0 8px",
+              }}
+            >
+              Setting up the voice
+            </h2>
+            <p style={{ margin: "0 0 20px", color: "#7A6F5E", fontSize: 14, lineHeight: 1.5 }}>
+              Downloading the high-quality neural voice — a one-time ~330&nbsp;MB, then it
+              runs instantly on your GPU.
+            </p>
+            <div
+              style={{
+                height: 8,
+                borderRadius: 4,
+                background: "#E7DCC6",
+                overflow: "hidden",
+              }}
+            >
+              <div
+                style={{
+                  height: "100%",
+                  width: `${tts.loadProgress}%`,
+                  background: "#17A398",
+                  transition: "width .3s linear",
+                }}
+              />
+            </div>
+            <p
+              style={{
+                margin: "10px 0 0",
+                fontFamily: "'Fraunces',serif",
+                fontWeight: 600,
+                fontSize: 15,
+                color: "#5C5345",
+              }}
+            >
+              {tts.loadProgress < 100
+                ? `Downloading… ${tts.loadProgress}%`
+                : "Preparing the voice…"}
+            </p>
+            <button
+              className="rcb-btn"
+              onClick={() => setVoiceOverlayDismissed(true)}
+              style={{
+                marginTop: 18,
+                padding: "10px 18px",
+                borderRadius: 12,
+                fontSize: 14,
+                fontWeight: 600,
+                background: "#FFFDF8",
+                color: "#5C5345",
+                boxShadow: "inset 0 0 0 1.5px #D8CBB2",
+              }}
+            >
+              Continue in background
+            </button>
+          </div>
+        </div>
+      )}
 
       <div style={{ maxWidth: 760, margin: "0 auto" }}>
         {/* header */}

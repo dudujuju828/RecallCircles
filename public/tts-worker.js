@@ -28,7 +28,12 @@ self.onmessage = async (e) => {
       for (const dtype of ["fp32", "fp16"]) {
         try {
           log("loading model", dtype, "on webgpu (first time downloads weights)…");
-          tts = await KokoroTTS.from_pretrained(modelId, { dtype, device: "webgpu" });
+          tts = await KokoroTTS.from_pretrained(modelId, {
+            dtype,
+            device: "webgpu",
+            // Report download progress so the UI can show a real loading bar.
+            progress_callback: (p) => self.postMessage({ type: "progress", data: p }),
+          });
           log("model ready:", dtype);
           lastErr = null;
           break;

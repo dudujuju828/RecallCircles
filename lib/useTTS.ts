@@ -31,6 +31,10 @@ export interface TTS {
   enabled: boolean;
   status: Status;
   error: string | null;
+  /** True while the neural model is downloading/compiling (first touch). */
+  loadingModel: boolean;
+  /** 0–100 download progress for the model weights. */
+  loadProgress: number;
   toggle: () => void;
   speak: (text: string) => void;
   stop: () => void;
@@ -41,6 +45,10 @@ export function useTTS(): TTS {
   const [enabled, setEnabled] = useState(false);
   const [status, setStatus] = useState<Status>("idle");
   const [error, setError] = useState<string | null>(null);
+  const [loadingModel, setLoadingModel] = useState(false);
+  const [loadProgress, setLoadProgress] = useState(0);
+
+  const filesRef = useRef<Record<string, { loaded: number; total: number }>>({});
 
   const engineRef = useRef<Engine>("none");
   const enabledRef = useRef(false);
@@ -134,12 +142,30 @@ export function useTTS(): TTS {
     if (workerReadyRef.current) return workerReadyRef.current;
     // eslint-disable-next-line no-console
     console.log("[tts] starting worker /tts-worker.js");
+    filesRef.current = {};
+    setLoadProgress(0);
+    setLoadingModel(true);
     const worker = new Worker("/tts-worker.js", { type: "module" });
     workerRef.current = worker;
     worker.addEventListener("message", (e: MessageEvent) => {
       const m = e.data;
       if (m.type === "audio") {
         enqueuePcm(m.pcm as ArrayBuffer, m.sampling_rate as number, m.id as number);
+      } else if (m.type === "progress") {
+        const d = m.data;
+        if (d && d.status === "progress" && d.file && typeof d.total === "number") {
+          filesRef.current[d.file] = {
+            loaded: Number(d.loaded) || 0,
+            total: Number(d.total) || 0,
+          };
+          let loaded = 0;
+          let total = 0;
+          for (const k in filesRef.current) {
+            loaded += filesRef.current[k].loaded;
+            total += filesRef.current[k].total;
+          }
+          if (total > 0) setLoadProgress(Math.min(99, Math.round((100 * loaded) / total)));
+        }
       } else if (m.type === "gen-error") {
         // eslint-disable-next-line no-console
         console.error("[tts] generate error:", m.message);
@@ -153,11 +179,14 @@ export function useTTS(): TTS {
           worker.removeEventListener("message", onLoad);
           // eslint-disable-next-line no-console
           console.log("[tts] model loaded");
+          setLoadProgress(100);
+          setLoadingModel(false);
           resolve();
         } else if (e.data.type === "load-error") {
           worker.removeEventListener("message", onLoad);
           // eslint-disable-next-line no-console
           console.error("[tts] model load error:", e.data.message);
+          setLoadingModel(false);
           reject(new Error(e.data.message));
         }
       };
@@ -302,6 +331,8 @@ export function useTTS(): TTS {
     enabled,
     status,
     error,
+    loadingModel,
+    loadProgress,
     toggle,
     speak,
     stop,
