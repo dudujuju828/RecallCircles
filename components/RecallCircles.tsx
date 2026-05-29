@@ -1537,7 +1537,31 @@ export default function RecallCircles() {
                         rows={2}
                         placeholder="e.g. what exactly is an event horizon?"
                       />
-                      <div style={{ display: "flex", gap: 12, marginTop: 12, flexWrap: "wrap" }}>
+                      {sliderControl(
+                        "How technical?",
+                        tech,
+                        setTech,
+                        technicalityLabel(tech),
+                        "Plain & everyday",
+                        "Research-level"
+                      )}
+                      {sliderControl(
+                        "Scope",
+                        scope,
+                        setScope,
+                        scopeLabel(scope),
+                        "Just the question",
+                        "Wider context"
+                      )}
+                      {sliderControl(
+                        "Response size",
+                        size,
+                        setSize,
+                        sizeLabel(size),
+                        "Brief",
+                        "In depth"
+                      )}
+                      <div style={{ display: "flex", gap: 12, marginTop: 16, flexWrap: "wrap" }}>
                         <button
                           className="rcb-btn"
                           onClick={askSubQuestion}
