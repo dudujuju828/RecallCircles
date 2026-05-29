@@ -16,6 +16,7 @@ import {
 } from "@/lib/constants";
 import { fmt } from "@/lib/utils";
 import type { AnswerRecord, Phase, QueueItem, Response } from "@/lib/types";
+import type { GenContext } from "@/lib/anthropic";
 import {
   errorMessage,
   generateExplanation,
@@ -40,13 +41,17 @@ import SettingsModal from "./SettingsModal";
 const verdictColor = (v: string) =>
   v === "nailed it" ? "#6A994E" : v === "not quite" ? "#D85A47" : "#C7892B";
 
-// A lesson we can return to after finishing a nested "sub-question" dig-in.
+// A lesson we can return to after finishing a nested "sub-question" dig-in —
+// including the dials it was generated with, so they're restored on return.
 interface LessonSnapshot {
   title: string;
   explanation: string;
   question: string;
   keyPoints: string[];
   trail: string[];
+  tech: number;
+  scope: number;
+  size: number;
 }
 
 export default function RecallCircles() {
@@ -76,6 +81,10 @@ export default function RecallCircles() {
   const [stack, setStack] = useState<LessonSnapshot[]>([]);
   const [askingSub, setAskingSub] = useState(false);
   const [subText, setSubText] = useState("");
+  // Independent dials for the sub-question being composed (not the main ones).
+  const [subTech, setSubTech] = useState(TECH_DEFAULT);
+  const [subScope, setSubScope] = useState(SCOPE_DEFAULT);
+  const [subSize, setSubSize] = useState(SIZE_DEFAULT);
 
   // BYOK key state.
   const [apiKey, setApiKey] = useState("");
@@ -158,13 +167,30 @@ export default function RecallCircles() {
     clearKey();
   }
 
+  // Snapshot of what the learner just did, for injecting into the next prompt.
+  function priorContext(kind: GenContext["kind"]): GenContext | null {
+    if (!result) return null;
+    return {
+      kind,
+      fromTitle: title,
+      fromExplanation: explanation,
+      fromQuestion: question,
+      learnerAnswer: response,
+      verdict: result.verdict,
+      feedback: result.feedback,
+    };
+  }
+
   /* ------------------------ explain (generate lesson) --------------------- */
-  // trailMode: "reset" = brand-new session, "push" = new branch,
+  // trailMode: "reset" = brand-new session, "push" = new branch/dig-in,
   // "keep" = re-explain the current topic (don't grow the trail).
+  // dials are passed explicitly so a sub-question can use its own without
+  // racing React state.
   async function runGenerate(
     targetTopic: string,
-    fromTopic: string | null,
+    context: GenContext | null,
     trailMode: "reset" | "push" | "keep",
+    dials: { tech: number; scope: number; size: number },
     remediate: "light" | "deep" | null = null
   ) {
     const t = targetTopic.trim();
@@ -180,8 +206,8 @@ export default function RecallCircles() {
       const lesson = await generateExplanation(
         apiKey,
         t,
-        { tech, scope, size, remediate },
-        fromTopic
+        { ...dials, remediate },
+        context
       );
       setTitle(lesson.title);
       setExplanation(lesson.explanation);
@@ -217,37 +243,45 @@ export default function RecallCircles() {
   }
 
   function generateFromInput() {
-    runGenerate(topic, null, "reset");
+    runGenerate(topic, null, "reset", { tech, scope, size });
   }
 
   function continueBranch() {
     const nb = result?.nextBranch?.trim();
     if (!nb) return;
     setTopic(nb);
-    runGenerate(nb, title, "push");
+    runGenerate(nb, priorContext("branch"), "push", { tech, scope, size });
   }
 
   // Re-explain the same topic after an imperfect answer: "light" = a touch
   // fuller (on the right track), "deep" = deeper + reasoning-first (not quite).
+  // Injects the learner's actual answer + feedback so it targets the real gap.
   function reexplain(level: "light" | "deep") {
-    runGenerate(topic, null, "keep", level);
+    runGenerate(topic, priorContext("reexplain"), "keep", { tech, scope, size }, level);
   }
 
-  // Dig into a separate sub-question, remembering the current lesson so we can
-  // return to it once the sub-question is nailed. Sub-questions can nest.
+  // Dig into a separate sub-question, remembering the current lesson (and its
+  // dials) so we can return once the sub-question is nailed. Sub-questions can
+  // nest and carry their own, independent dials + injected parent context.
   function askSubQuestion() {
     const sub = subText.trim();
     if (!sub) return;
+    const ctx = priorContext("sub");
     setStack((s) => [
       ...s,
-      { title, explanation, question, keyPoints, trail },
+      { title, explanation, question, keyPoints, trail, tech, scope, size },
     ]);
     setAskingSub(false);
     setSubText("");
-    runGenerate(sub, title, "push");
+    // The sub-question's own dials become the current dials for this lesson.
+    setTech(subTech);
+    setScope(subScope);
+    setSize(subSize);
+    runGenerate(sub, ctx, "push", { tech: subTech, scope: subScope, size: subSize });
   }
 
-  // Pop back to the lesson we were on before the sub-question, to re-answer it.
+  // Pop back to the lesson we were on before the sub-question, restoring its
+  // dials too, to take another crack at the original question.
   function returnToOriginal() {
     const prev = stack[stack.length - 1];
     if (!prev) return;
@@ -257,6 +291,9 @@ export default function RecallCircles() {
     setQuestion(prev.question);
     setKeyPoints(prev.keyPoints);
     setTrail(prev.trail);
+    setTech(prev.tech);
+    setScope(prev.scope);
+    setSize(prev.size);
     startQuestion(); // fresh attempt at the original question
   }
 
@@ -1510,7 +1547,14 @@ export default function RecallCircles() {
                         <button
                           className="rcb-btn"
                           onClick={() => {
-                            setSubText("");
+                            if (!askingSub) {
+                              // Seed the sub-question's independent dials from
+                              // the current lesson's, then let them diverge.
+                              setSubTech(tech);
+                              setSubScope(scope);
+                              setSubSize(size);
+                              setSubText("");
+                            }
                             setAskingSub((v) => !v);
                           }}
                           style={subtleStyle}
@@ -1539,25 +1583,25 @@ export default function RecallCircles() {
                       />
                       {sliderControl(
                         "How technical?",
-                        tech,
-                        setTech,
-                        technicalityLabel(tech),
+                        subTech,
+                        setSubTech,
+                        technicalityLabel(subTech),
                         "Plain & everyday",
                         "Research-level"
                       )}
                       {sliderControl(
                         "Scope",
-                        scope,
-                        setScope,
-                        scopeLabel(scope),
+                        subScope,
+                        setSubScope,
+                        scopeLabel(subScope),
                         "Just the question",
                         "Wider context"
                       )}
                       {sliderControl(
                         "Response size",
-                        size,
-                        setSize,
-                        sizeLabel(size),
+                        subSize,
+                        setSubSize,
+                        sizeLabel(subSize),
                         "Brief",
                         "In depth"
                       )}

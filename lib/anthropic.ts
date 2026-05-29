@@ -18,6 +18,24 @@ export interface GenOptions {
   remediate?: "light" | "deep" | null;
 }
 
+/**
+ * What just happened before this generation, injected so the AI knows the
+ * context: the relationship to the prior lesson and how the learner actually
+ * did. Used for branches, re-explanations, and sub-question dig-ins.
+ */
+export interface GenContext {
+  /** "branch" (forward), "reexplain" (same topic), or "sub" (dig-in). */
+  kind: "branch" | "reexplain" | "sub";
+  /** The lesson this came from. */
+  fromTitle: string;
+  fromExplanation: string;
+  fromQuestion: string;
+  /** What the learner said and how it was judged on that prior question. */
+  learnerAnswer: string;
+  verdict: Verdict;
+  feedback: string;
+}
+
 /*
  * BYOK Anthropic client.
  *
@@ -198,19 +216,41 @@ function parseJson<T>(raw: string): T {
 
 /* --------------------------- prompt builders --------------------------- */
 
+function buildContextBlock(ctx: GenContext): string {
+  const transcript = `Earlier, the learner studied "${ctx.fromTitle}".
+That explanation was: """${ctx.fromExplanation}"""
+They were asked: "${ctx.fromQuestion}"
+They answered: """${ctx.learnerAnswer.trim() || "(left blank)"}"""
+That answer was judged "${ctx.verdict}", with this feedback: "${ctx.feedback}"`;
+
+  if (ctx.kind === "sub") {
+    return `CONTEXT — the learner is pausing the lesson above to dig into a smaller sub-question first, because they did not fully get it:
+${transcript}
+
+Use this to pitch the sub-question explanation: target the specific gap their answer revealed, and lay the groundwork that will help them return and nail the original question. Still make the explanation stand on its own.`;
+  }
+  if (ctx.kind === "reexplain") {
+    return `CONTEXT — this is a re-explanation of the SAME topic, because the learner's first attempt fell short:
+${transcript}
+
+Directly address where their answer went wrong or fell short — don't just repeat the previous explanation in different words; close the specific gap it reveals.`;
+  }
+  // branch
+  return `CONTEXT — this branches forward from what the learner just grasped:
+${transcript}
+
+Connect to it in a sentence so the thread is continuous, then make the new explanation stand on its own.`;
+}
+
 function buildExplainPrompt(
   topic: string,
   opts: GenOptions,
-  fromTopic: string | null
+  context: GenContext | null
 ): string {
   return `You are the engine of a study loop: the learner picks a topic, you explain it, then you pose one question that tests whether they grasped the core idea.
 
 Topic: "${topic}"
-${
-  fromTopic
-    ? `This is a branch that follows on from "${fromTopic}" — connect to it in a sentence, but make the explanation stand on its own.`
-    : ""
-}
+${context ? "\n" + buildContextBlock(context) + "\n" : ""}
 Follow all three of these dials:
 - Technicality (${opts.tech}/10): ${technicalityPrompt(opts.tech)}
 - Scope (${opts.scope}/10): ${scopePrompt(opts.scope)}
@@ -304,7 +344,7 @@ export async function generateExplanation(
   apiKey: string,
   topic: string,
   opts: GenOptions,
-  fromTopic: string | null = null
+  context: GenContext | null = null
 ): Promise<Lesson> {
   // A re-explanation bumps length on top of the size dial: deeper for a
   // "not quite", a touch fuller for "on the right track".
@@ -312,7 +352,7 @@ export async function generateExplanation(
   const size = Math.min(10, opts.size + bump);
   const raw = await callClaude(
     apiKey,
-    buildExplainPrompt(topic, { ...opts, size }, fromTopic),
+    buildExplainPrompt(topic, { ...opts, size }, context),
     sizeMaxTokens(size)
   );
   const parsed = parseJson<Partial<Lesson>>(raw);
