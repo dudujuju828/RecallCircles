@@ -23,6 +23,8 @@ export interface Passage {
 export interface Grade {
   verdict: Verdict;
   feedback: string;
+  /** A concise ideal answer, shown when the learner hasn't nailed it yet. */
+  modelAnswer: string;
 }
 
 export interface QueueItem {

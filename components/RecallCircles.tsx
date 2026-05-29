@@ -40,6 +40,9 @@ import SettingsModal from "./SettingsModal";
 const verdictColor = (v: string) =>
   v === "nailed it" ? "#6A994E" : v === "not quite" ? "#D85A47" : "#C7892B";
 
+/** Compact seconds label: "30s" under a minute, "1:00" at/above. */
+const labelSecs = (s: number) => (s >= 60 ? fmt(s) : `${s}s`);
+
 export default function RecallCircles() {
   const [phase, setPhase] = useState<Phase>("input");
   const [topic, setTopic] = useState("");
@@ -62,6 +65,14 @@ export default function RecallCircles() {
   const [readLeft, setReadLeft] = useState(READ_SECONDS);
   const [feedback, setFeedback] = useState<Grade | null>(null);
   const [error, setError] = useState("");
+
+  // Answer rounds: the question repeats until "nailed it", doubling the clock
+  // each time (30s → 60s → 2:00 → …). `roundSeconds` is the current round's
+  // total (timer denominator); `graderError` lets us avoid trapping the user
+  // in a retry loop when the grader couldn't be reached.
+  const [attempt, setAttempt] = useState(1);
+  const [roundSeconds, setRoundSeconds] = useState(ANSWER_SECONDS);
+  const [graderError, setGraderError] = useState(false);
 
   // BYOK key state.
   const [apiKey, setApiKey] = useState("");
@@ -197,10 +208,26 @@ export default function RecallCircles() {
 
   /* ----------------------------- timed question ---------------------------- */
   function startQuestion() {
+    setAttempt(1);
+    setRoundSeconds(ANSWER_SECONDS);
+    setTimeLeft(ANSWER_SECONDS);
     setResponse("");
     setFeedback(null);
     submittedRef.current = false;
-    setTimeLeft(ANSWER_SECONDS);
+    setPhase("question");
+  }
+
+  // Another go at the same question after a not-quite answer. Each round
+  // doubles the clock: round 1 = 30s, round 2 = 60s, round 3 = 2:00, …
+  function retryQuestion() {
+    const nextAttempt = attempt + 1;
+    const secs = ANSWER_SECONDS * 2 ** (nextAttempt - 1);
+    setAttempt(nextAttempt);
+    setRoundSeconds(secs);
+    setTimeLeft(secs);
+    setResponse("");
+    setFeedback(null);
+    submittedRef.current = false;
     setPhase("question");
   }
 
@@ -247,6 +274,7 @@ export default function RecallCircles() {
     if (submittedRef.current) return;
     submittedRef.current = true;
     setPhase("grading");
+    setGraderError(false);
     try {
       const g = await gradeAnswer(apiKey, {
         chunks,
@@ -260,12 +288,15 @@ export default function RecallCircles() {
         setAuthError("That key was rejected — check it and try again.");
         setShowSettings(true);
       }
+      // Couldn't verify correctness — don't trap the user in retries.
+      setGraderError(true);
       setFeedback({
         verdict: "on the right track",
         feedback:
           "Couldn't reach the grader just now — the key idea: " +
           (keyPoints.join("; ") || title) +
           ".",
+        modelAnswer: keyPoints.join(" ") || title,
       });
     }
     setPhase("feedback");
@@ -1124,7 +1155,7 @@ export default function RecallCircles() {
                   margin: 0,
                 }}
               >
-                In your own words
+                In your own words{attempt > 1 ? ` · round ${attempt}` : ""}
               </p>
               <span
                 style={{
@@ -1135,7 +1166,7 @@ export default function RecallCircles() {
                   animation: timeLeft <= 10 ? "rcb-pulse 1s infinite" : "none",
                 }}
               >
-                {timeLeft}s
+                {labelSecs(timeLeft)}
               </span>
             </div>
             <div
@@ -1150,7 +1181,7 @@ export default function RecallCircles() {
               <div
                 style={{
                   height: "100%",
-                  width: `${(timeLeft / ANSWER_SECONDS) * 100}%`,
+                  width: `${(timeLeft / roundSeconds) * 100}%`,
                   background: timeLeft <= 10 ? "#D85A47" : "#E4572E",
                   transition: "width 1s linear",
                 }}
@@ -1271,38 +1302,110 @@ export default function RecallCircles() {
               </p>
             </div>
 
-            <div style={{ display: "flex", gap: 12, marginTop: 22, flexWrap: "wrap" }}>
-              <button
-                className="rcb-btn"
-                onClick={startReflect}
-                style={{
-                  padding: "14px 26px",
-                  borderRadius: 14,
-                  fontSize: 15,
-                  fontWeight: 700,
-                  background: "#E4572E",
-                  color: "#fff",
-                  boxShadow: "0 8px 22px rgba(228,87,46,.35)",
-                }}
-              >
-                What next? →
-              </button>
-              <button
-                className="rcb-btn"
-                onClick={() => setPhase("read")}
-                style={{
-                  padding: "14px 22px",
-                  borderRadius: 14,
-                  fontSize: 15,
-                  fontWeight: 600,
-                  background: "#FFFDF8",
-                  color: "#5C5345",
-                  boxShadow: "inset 0 0 0 1.5px #D8CBB2",
-                }}
-              >
-                Replay this one
-              </button>
-            </div>
+            {(() => {
+              const nailed = feedback.verdict === "nailed it";
+              // Only a correct answer opens the road to "what next". If the
+              // grader was unreachable we can't verify, so we let them through
+              // rather than trap them in an unwinnable retry loop.
+              const canAdvance = nailed || graderError;
+              const nextRoundSecs = ANSWER_SECONDS * 2 ** attempt;
+              return (
+                <>
+                  {!canAdvance && (
+                    <div
+                      style={{
+                        marginTop: 22,
+                        background: "#EDF5E6",
+                        border: "1px solid #A9CC8E",
+                        borderRadius: 16,
+                        padding: "18px 22px",
+                      }}
+                    >
+                      <p
+                        style={{
+                          fontSize: 12,
+                          fontWeight: 700,
+                          color: "#6A994E",
+                          textTransform: "uppercase",
+                          letterSpacing: ".08em",
+                          margin: "0 0 8px",
+                        }}
+                      >
+                        A model answer
+                      </p>
+                      <p
+                        style={{
+                          fontFamily: "'Newsreader', serif",
+                          fontSize: 18,
+                          lineHeight: 1.55,
+                          color: "#2B241B",
+                          margin: 0,
+                        }}
+                      >
+                        {feedback.modelAnswer}
+                      </p>
+                      <p style={{ margin: "12px 0 0", fontSize: 14, color: "#5C5345" }}>
+                        Take it in, then put the idea back in your own words —
+                        you&apos;ll get {labelSecs(nextRoundSecs)} this round.
+                      </p>
+                    </div>
+                  )}
+
+                  <div
+                    style={{ display: "flex", gap: 12, marginTop: 22, flexWrap: "wrap" }}
+                  >
+                    {canAdvance ? (
+                      <button
+                        className="rcb-btn"
+                        onClick={startReflect}
+                        style={{
+                          padding: "14px 26px",
+                          borderRadius: 14,
+                          fontSize: 15,
+                          fontWeight: 700,
+                          background: "#E4572E",
+                          color: "#fff",
+                          boxShadow: "0 8px 22px rgba(228,87,46,.35)",
+                        }}
+                      >
+                        What next? →
+                      </button>
+                    ) : (
+                      <button
+                        className="rcb-btn"
+                        onClick={retryQuestion}
+                        style={{
+                          padding: "14px 26px",
+                          borderRadius: 14,
+                          fontSize: 15,
+                          fontWeight: 700,
+                          background: "#E4572E",
+                          color: "#fff",
+                          boxShadow: "0 8px 22px rgba(228,87,46,.35)",
+                        }}
+                      >
+                        Try again — {labelSecs(nextRoundSecs)} →
+                      </button>
+                    )}
+                    <button
+                      className="rcb-btn"
+                      onClick={() => setPhase("read")}
+                      style={{
+                        padding: "14px 22px",
+                        borderRadius: 14,
+                        fontSize: 15,
+                        fontWeight: 600,
+                        background: "#FFFDF8",
+                        color: "#5C5345",
+                        boxShadow: "inset 0 0 0 1.5px #D8CBB2",
+                      }}
+                    >
+                      Replay this one
+                    </button>
+                  </div>
+                </>
+              );
+            })()}
           </div>
         )}
 

@@ -154,8 +154,9 @@ Key ideas a correct answer must convey: ${p.keyPoints.join(" | ") || "(use your 
 Learner's answer: """${p.answer.trim() || "(left blank)"}"""
 
 If the answer is blank, gently state the key idea they were reaching for.
+Also write a model answer: a concise, plain-language ideal response to the question (1-2 sentences) that fully conveys the core idea — the kind of answer that would earn "nailed it".
 Respond with ONLY valid JSON, no fences:
-{"verdict":"nailed it" | "on the right track" | "not quite","feedback":"2-3 warm sentences: what they got, and the core idea if they missed it"}`;
+{"verdict":"nailed it" | "on the right track" | "not quite","feedback":"2-3 warm sentences: what they got, and the core idea if they missed it","modelAnswer":"1-2 sentence ideal answer to the question"}`;
 }
 
 function buildSplitPrompt(dump: string, sourceTopic: string): string {
@@ -221,7 +222,13 @@ export async function gradeAnswer(
   const verdict: Verdict = allowed.includes(parsed.verdict as Verdict)
     ? (parsed.verdict as Verdict)
     : "on the right track";
-  return { verdict, feedback: String(parsed.feedback ?? "").trim() };
+  const modelAnswer =
+    String(parsed.modelAnswer ?? "").trim() || args.keyPoints.join(" ");
+  return {
+    verdict,
+    feedback: String(parsed.feedback ?? "").trim(),
+    modelAnswer,
+  };
 }
 
 export async function splitThoughts(
