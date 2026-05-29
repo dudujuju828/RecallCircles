@@ -5,7 +5,7 @@ A branching, active study loop:
 1. Type a topic and set **how technical** the explanation should be (a 1–10 slider).
 2. Claude writes a short explanation, plus one question about the core idea.
 3. You get **3:00 to learn it**; then the explanation is hidden.
-4. You answer **one timed open question** (30s — type or speak it).
+4. You answer **one timed open question** (2:00 by default — type or speak it).
 5. Claude tells you whether you conveyed the **core idea**.
 6. **If you got it right**, Claude proposes a slightly adjacent **branch** —
    **Continue** drills into it (the loop repeats, one step deeper each time).
@@ -54,7 +54,7 @@ across branches within a session.
 
 ## Voice input
 
-The 30s question (and the reflect dump) support speaking your answer via the
+The timed question (and the reflect dump) support speaking your answer via the
 browser's built-in **Web Speech API** — no Whisper, no extra key, no server.
 Where it isn't supported (notably Firefox) or mic permission is denied, the mic
 hides and typing works as normal.

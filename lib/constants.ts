@@ -9,7 +9,7 @@ export const COLORS = [
   "#7B2CBF",
 ];
 
-export const ANSWER_SECONDS = 30;
+export const ANSWER_SECONDS = 120;
 export const READ_SECONDS = 180;
 
 /* ----------------------------- technicality ----------------------------- */
