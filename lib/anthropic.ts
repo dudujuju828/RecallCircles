@@ -333,16 +333,25 @@ function buildRespondPrompt(p: {
   keyPoints: string[];
   answer: string;
 }): string {
-  return `You are grading a learner's free-text answer in a study loop, and steering where they go next. Be warm and encouraging. Focus ONLY on whether the core idea is conveyed — ignore grammar, spelling, and phrasing.
+  return `You are a fair, encouraging teacher grading a learner's free-text answer to a question, and steering where they go next.
 
-What they studied (reference): ${p.explanation}
 Question: ${p.question}
-Key ideas a correct answer must convey: ${p.keyPoints.join(" | ") || "(use your judgement)"}
 Learner's answer: """${p.answer.trim() || "(left blank)"}"""
 
-1. Judge whether they got the core idea (be lenient on wording).
-2. Write 2-3 warm sentences of feedback: what they got, and the core idea if they missed it. If the answer is blank, gently state the idea they were reaching for.
-3. Propose nextBranch: a short topic (2-6 words) naming a natural next thing to explore that branches slightly outward from this one — the curiosity this answer should open up.
+For reference only (what a correct answer is about — NOT a script to reproduce):
+- Explanation they read: ${p.explanation}
+- Key ideas: ${p.keyPoints.join(" | ") || "(use your judgement)"}
+
+Grade on the TRUTH and substance of their answer: "would this be considered a good answer to the question?" — the way a fair teacher would. Be lenient:
+- Reward a correct, sensible answer even if it is brief, differently worded, comes from their own knowledge, or adds detail beyond the reference. The reference is one way to be right, not the only way.
+- Do NOT require them to reproduce the explanation or hit every key idea. Omitting a side detail is fine if the question itself is answered well.
+- Ignore grammar, spelling, and phrasing.
+- Only judge "not quite" if the answer is actually wrong, off-topic, or misunderstands the question; "on the right track" if it is partly right but incomplete or slightly off; "nailed it" if it would genuinely be considered a good answer.
+
+Then:
+1. Pick the verdict by that standard.
+2. Write 2-3 warm sentences of feedback: what they got right, and what (if anything) a fuller answer would add.
+3. Propose nextBranch: a short topic (2-6 words) naming a natural next thing to explore that branches slightly outward from this one.
 
 Respond with ONLY valid JSON, no fences:
 {"verdict":"nailed it" | "on the right track" | "not quite","feedback":"...","nextBranch":"short topic"}`;

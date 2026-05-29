@@ -54,6 +54,7 @@ const verdictColor = (v: string) =>
 // A lesson we can return to after finishing a nested "sub-question" dig-in —
 // including the dials it was generated with, so they're restored on return.
 interface LessonSnapshot {
+  topic: string;
   title: string;
   explanation: string;
   question: string;
@@ -208,15 +209,32 @@ export default function RecallCircles() {
   // trail alone (lesson-plan steps manage their own progress).
   // dials are passed explicitly so a sub-question can use its own without
   // racing React state. fixedQuestion/covered drive lesson-plan steps.
-  async function runGenerate(
-    targetTopic: string,
-    context: GenContext | null,
-    trailMode: "reset" | "push" | "keep" | "none",
-    dials: { tech: number; scope: number; size: number },
-    remediate: "light" | "deep" | null = null,
-    fixedQuestion: string | null = null,
-    covered: string[] = []
-  ) {
+  // failPhase: where to land if generation fails (so a transient error never
+  // resets the lesson). onSuccess: state to commit only once generation lands.
+  interface GenRun {
+    topic: string;
+    context?: GenContext | null;
+    trailMode: "reset" | "push" | "keep" | "none";
+    dials: { tech: number; scope: number; size: number };
+    remediate?: "light" | "deep" | null;
+    fixedQuestion?: string | null;
+    covered?: string[];
+    failPhase?: Phase;
+    onSuccess?: () => void;
+  }
+
+  async function runGenerate(opts: GenRun) {
+    const {
+      topic: targetTopic,
+      context = null,
+      trailMode,
+      dials,
+      remediate = null,
+      fixedQuestion = null,
+      covered = [],
+      failPhase = "input",
+      onSuccess,
+    } = opts;
     const t = targetTopic.trim();
     if (!t) return;
     if (!apiKey.trim()) {
@@ -260,6 +278,7 @@ export default function RecallCircles() {
         removeFromQueue(pendingQueueId);
         setPendingQueueId(null);
       }
+      onSuccess?.();
       setPhase("explain");
       if (tts.enabled) tts.speak(lesson.explanation);
     } catch (e) {
@@ -268,14 +287,14 @@ export default function RecallCircles() {
         setAuthError("That key was rejected — check it and try again.");
         setShowSettings(true);
       }
-      // On a lesson step, failing drops back to the plan, not the input screen.
-      setPhase(planActive ? "plan" : "input");
+      // Return to where the user was — never silently reset their progress.
+      setPhase(failPhase);
     }
   }
 
   function generateFromInput() {
     setPlanActive(false);
-    runGenerate(topic, null, "reset", { tech, scope, size });
+    runGenerate({ topic, trailMode: "reset", dials: { tech, scope, size } });
   }
 
   /* ------------------------------ lesson plan ----------------------------- */
@@ -320,17 +339,32 @@ export default function RecallCircles() {
     setPlanActive(true);
     setPlanIndex(0);
     setTrail([plan.title]);
-    runLessonStep(0);
+    // First step: a failure should land back on the plan review, not input.
+    runLessonStep(0, null, "plan");
   }
 
   // Generate (or re-generate) the explanation that teaches plan question `index`.
-  function runLessonStep(index: number, remediate: "light" | "deep" | null = null) {
+  function runLessonStep(
+    index: number,
+    remediate: "light" | "deep" | null = null,
+    failPhase: Phase = "respond"
+  ) {
     if (!plan) return;
     const q = plan.questions[index];
     if (!q) return;
     const covered = plan.questions.slice(0, index);
-    const ctx = remediate ? priorContext("reexplain") : null;
-    runGenerate(planTopic, ctx, "none", { tech, scope, size }, remediate, q, covered);
+    runGenerate({
+      topic: planTopic,
+      context: remediate ? priorContext("reexplain") : null,
+      trailMode: "none",
+      dials: { tech, scope, size },
+      remediate,
+      fixedQuestion: q,
+      covered,
+      failPhase,
+      // Commit the new index only once the step actually generated.
+      onSuccess: () => setPlanIndex(index),
+    });
   }
 
   function nextPlanQuestion() {
@@ -340,7 +374,6 @@ export default function RecallCircles() {
       startReflect(); // lesson complete → wrap up
       return;
     }
-    setPlanIndex(next);
     runLessonStep(next);
   }
 
@@ -348,7 +381,13 @@ export default function RecallCircles() {
     const nb = result?.nextBranch?.trim();
     if (!nb) return;
     setTopic(nb);
-    runGenerate(nb, priorContext("branch"), "push", { tech, scope, size });
+    runGenerate({
+      topic: nb,
+      context: priorContext("branch"),
+      trailMode: "push",
+      dials: { tech, scope, size },
+      failPhase: "respond",
+    });
   }
 
   // Re-explain the same topic after an imperfect answer: "light" = a touch
@@ -361,7 +400,14 @@ export default function RecallCircles() {
       runLessonStep(planIndex, level);
       return;
     }
-    runGenerate(topic, priorContext("reexplain"), "keep", { tech, scope, size }, level);
+    runGenerate({
+      topic,
+      context: priorContext("reexplain"),
+      trailMode: "keep",
+      dials: { tech, scope, size },
+      remediate: level,
+      failPhase: "respond",
+    });
   }
 
   // Dig into a separate sub-question, remembering the current lesson (and its
@@ -373,15 +419,23 @@ export default function RecallCircles() {
     const ctx = priorContext("sub");
     setStack((s) => [
       ...s,
-      { title, explanation, question, keyPoints, trail, tech, scope, size },
+      { topic, title, explanation, question, keyPoints, trail, tech, scope, size },
     ]);
     setAskingSub(false);
     setSubText("");
-    // The sub-question's own dials become the current dials for this lesson.
+    // The sub-question becomes the current topic (so re-explaining it later
+    // targets the sub, not the parent), with its own independent dials.
+    setTopic(sub);
     setTech(subTech);
     setScope(subScope);
     setSize(subSize);
-    runGenerate(sub, ctx, "push", { tech: subTech, scope: subScope, size: subSize });
+    runGenerate({
+      topic: sub,
+      context: ctx,
+      trailMode: "push",
+      dials: { tech: subTech, scope: subScope, size: subSize },
+      failPhase: "respond",
+    });
   }
 
   // Pop back to the lesson we were on before the sub-question, restoring its
@@ -390,6 +444,7 @@ export default function RecallCircles() {
     const prev = stack[stack.length - 1];
     if (!prev) return;
     setStack((s) => s.slice(0, -1));
+    setTopic(prev.topic);
     setTitle(prev.title);
     setExplanation(prev.explanation);
     setQuestion(prev.question);
@@ -1765,6 +1820,12 @@ export default function RecallCircles() {
                 {response.trim() || "(ran out of time — left blank)"}
               </p>
             </div>
+
+            {error && (
+              <p style={{ color: "#C0392B", fontSize: 14, marginTop: 18, marginBottom: 0 }}>
+                {error} Your place is saved — try that again.
+              </p>
+            )}
 
             {(() => {
               const inSub = stack.length > 0;
