@@ -1,0 +1,124 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ---- Recall Circles visual language (ported from the prototype) ---- */
+.rcb * {
+  box-sizing: border-box;
+}
+
+@keyframes rcb-fadeup {
+  from {
+    opacity: 0;
+    transform: translateY(14px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@keyframes rcb-pop {
+  0% {
+    transform: scale(0.7);
+  }
+  60% {
+    transform: scale(1.07);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+@keyframes rcb-bob {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-13px);
+  }
+}
+@keyframes rcb-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.45;
+  }
+}
+@keyframes rcb-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.rcb-dot {
+  cursor: pointer;
+  transition: transform 0.18s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+.rcb-dot:hover {
+  transform: translateY(-4px) scale(1.04);
+}
+
+.rcb-btn {
+  cursor: pointer;
+  transition: transform 0.12s, opacity 0.2s;
+  border: none;
+  font-family: inherit;
+}
+.rcb-btn:hover {
+  transform: translateY(-2px);
+}
+.rcb-btn:active {
+  transform: translateY(0);
+}
+.rcb-btn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+  transform: none;
+}
+
+.rcb-pill {
+  cursor: pointer;
+  transition: transform 0.15s;
+}
+.rcb-pill:hover {
+  transform: translateY(-2px);
+}
+
+.rcb-ta {
+  width: 100%;
+  font-family: "Newsreader", serif;
+  font-size: 18px;
+  line-height: 1.5;
+  color: #211b14;
+  background: #fffdf8;
+  border: 1.5px solid #d8cbb2;
+  border-radius: 16px;
+  padding: 16px 18px;
+  outline: none;
+  resize: none;
+}
+.rcb-ta:focus {
+  border-color: #b9a684;
+}
+
+.rcb-spinner {
+  display: inline-block;
+  width: 16px;
+  height: 16px;
+  border: 2px solid #d8cbb2;
+  border-top-color: #5c5345;
+  border-radius: 50%;
+  animation: rcb-spin 0.7s linear infinite;
+}
