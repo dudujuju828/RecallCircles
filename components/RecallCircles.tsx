@@ -338,9 +338,10 @@ export default function RecallCircles() {
       // Couldn't verify — don't trap the user; let them retry or wrap up.
       setGraderError(true);
       const fallback =
-        "Couldn't reach the grader just now — the key idea: " +
+        errorMessage(e) +
+        " (Couldn't grade this one automatically — the key idea you were reaching for: " +
         (keyPoints.join("; ") || title) +
-        ".";
+        ".)";
       setResult({
         verdict: "on the right track",
         feedback: fallback,

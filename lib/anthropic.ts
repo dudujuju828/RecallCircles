@@ -65,76 +65,130 @@ interface MessagesResponse {
   content?: Array<{ type: string; text?: string }>;
 }
 
-/** Single round-trip to the Messages API; returns the concatenated text. */
+// Transient HTTP statuses worth retrying (rate limit, overloaded, gateway).
+const RETRYABLE = new Set([408, 429, 500, 502, 503, 529]);
+const MAX_ATTEMPTS = 3;
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * Round-trip to the Messages API with retry + backoff on transient failures
+ * (a 429 rate-limit or a 529 "overloaded" — common on back-to-back Opus calls).
+ * Returns the concatenated text.
+ */
 async function callClaude(
   apiKey: string,
   prompt: string,
   maxTokens: number = MAX_TOKENS
 ): Promise<string> {
-  let res: globalThis.Response;
-  try {
-    res = await fetch(API_URL, {
-      method: "POST",
-      headers: {
-        "x-api-key": apiKey,
-        "anthropic-version": ANTHROPIC_VERSION,
-        "anthropic-dangerous-direct-browser-access": "true",
-        "content-type": "application/json",
-      },
-      body: JSON.stringify({
-        model: MODEL,
-        max_tokens: maxTokens,
-        messages: [{ role: "user", content: prompt }],
-      }),
-    });
-  } catch {
-    throw new AnthropicError(
-      "network",
-      "Couldn't reach Anthropic — check your connection and try again."
-    );
-  }
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    const last = attempt === MAX_ATTEMPTS;
+    const backoff = 700 * attempt; // 700ms, 1400ms
 
-  if (res.status === 401) {
-    throw new AnthropicError(
-      "auth",
-      "That key was rejected — check it and try again."
-    );
-  }
-  if (res.status === 429) {
-    throw new AnthropicError(
-      "rate",
-      "Hit a rate limit (or this key is out of credit) — wait a moment and retry."
-    );
-  }
-  if (!res.ok) {
-    throw new AnthropicError(
-      "unknown",
-      `Anthropic returned an error (${res.status}) — give it another go.`
-    );
-  }
+    let res: globalThis.Response;
+    try {
+      res = await fetch(API_URL, {
+        method: "POST",
+        headers: {
+          "x-api-key": apiKey,
+          "anthropic-version": ANTHROPIC_VERSION,
+          "anthropic-dangerous-direct-browser-access": "true",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          model: MODEL,
+          max_tokens: maxTokens,
+          messages: [{ role: "user", content: prompt }],
+        }),
+      });
+    } catch {
+      if (!last) {
+        await sleep(backoff);
+        continue;
+      }
+      throw new AnthropicError(
+        "network",
+        "Couldn't reach Anthropic — check your connection and try again."
+      );
+    }
 
-  let data: MessagesResponse;
-  try {
-    data = (await res.json()) as MessagesResponse;
-  } catch {
-    throw new AnthropicError(
-      "parse",
-      "Got a malformed response — give it another go."
-    );
-  }
+    // 401 is never retryable.
+    if (res.status === 401) {
+      throw new AnthropicError(
+        "auth",
+        "That key was rejected — check it and try again."
+      );
+    }
 
-  return (data.content ?? [])
-    .filter((b) => b.type === "text" && typeof b.text === "string")
-    .map((b) => b.text as string)
-    .join("\n");
+    if (RETRYABLE.has(res.status)) {
+      if (!last) {
+        await sleep(backoff);
+        continue;
+      }
+      if (res.status === 429) {
+        throw new AnthropicError(
+          "rate",
+          "Hit a rate limit (or this key is out of credit) — wait a moment and try again."
+        );
+      }
+      throw new AnthropicError(
+        "network",
+        `Anthropic is busy right now (error ${res.status}) — give it another moment and retry.`
+      );
+    }
+
+    if (!res.ok) {
+      throw new AnthropicError(
+        "unknown",
+        `Anthropic returned an error (${res.status}) — give it another go.`
+      );
+    }
+
+    let data: MessagesResponse;
+    try {
+      data = (await res.json()) as MessagesResponse;
+    } catch {
+      if (!last) {
+        await sleep(backoff);
+        continue;
+      }
+      throw new AnthropicError(
+        "parse",
+        "Got a malformed response — give it another go."
+      );
+    }
+
+    const text = (data.content ?? [])
+      .filter((b) => b.type === "text" && typeof b.text === "string")
+      .map((b) => b.text as string)
+      .join("\n");
+
+    // An empty body is treated as transient (a hiccup) and retried.
+    if (!text.trim() && !last) {
+      await sleep(backoff);
+      continue;
+    }
+    return text;
+  }
+  // Unreachable, but satisfies the type checker.
+  throw new AnthropicError("network", "Couldn't reach Anthropic — try again.");
 }
 
-/** Strip ```json / ``` fences, then JSON.parse. */
+/** Strip ```json / ``` fences, then JSON.parse — tolerating stray prose. */
 function parseJson<T>(raw: string): T {
   const cleaned = raw.replace(/```json/gi, "").replace(/```/g, "").trim();
   try {
     return JSON.parse(cleaned) as T;
   } catch {
+    // Some replies wrap the JSON in a sentence or two — extract the object.
+    const start = cleaned.indexOf("{");
+    const end = cleaned.lastIndexOf("}");
+    if (start !== -1 && end > start) {
+      try {
+        return JSON.parse(cleaned.slice(start, end + 1)) as T;
+      } catch {
+        /* fall through */
+      }
+    }
     throw new AnthropicError(
       "parse",
       "The model's reply wasn't readable — give it another go."
